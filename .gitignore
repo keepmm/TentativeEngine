@@ -1,0 +1,10 @@
+# ビルド出力（Visual Studio の CMake 連携が作る）
+out/
+build/
+
+# Visual Studio のキャッシュ・個人設定
+.vs/
+*.user
+
+# Claude Code の個人用設定
+.claude/settings.local.json
