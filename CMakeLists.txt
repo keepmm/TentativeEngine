@@ -91,9 +91,46 @@ add_executable(TentativeEngine WIN32
 
     src/Engine/Engine.hpp
     src/Engine/Engine.cpp
+
+    src/Math/Math.hpp
+    src/Math/Mathf.hpp
+    src/Math/Vector2.hpp
+    src/Math/Vector3.hpp
+    src/Math/Vector4.hpp
+    src/Math/VectorInt.hpp
+    src/Math/Quaternion.hpp
+    src/Math/Matrix4x4.hpp
+    src/Math/Color.hpp
+    src/Math/Rect.hpp
+    src/Math/Ray.hpp
+    src/Math/Plane.hpp
+    src/Math/Bounds.hpp
+    src/Math/BoundingSphere.hpp
+    src/Math/Random.hpp
+    src/Math/Easing.hpp
+    src/Math/Intersection.hpp
+    src/Math/Frustum.hpp
+    src/Math/Half.hpp
 )
 
 target_include_directories(TentativeEngine PRIVATE src)
 
 # d3dcompiler : 実行時の HLSL コンパイル（ShaderCompiler.cpp だけが使う）
 target_link_libraries(TentativeEngine PRIVATE RHI d3dcompiler)
+
+# ---- Math ----
+# ヘッダだけのライブラリ。何にも依存しない。使う側は target_link_libraries(... Math)
+add_library(Math INTERFACE)
+target_include_directories(Math INTERFACE src)
+
+# ---- テスト（ウィンドウも GPU も使わないのでコンソールで動く）----
+enable_testing()
+
+add_executable(MathTests tests/MathTests.cpp)
+target_link_libraries(MathTests PRIVATE Math)
+add_test(NAME MathTests COMMAND MathTests)
+
+# DirectXMath（Windows SDK に入っている）との答え合わせ。本体は DirectXMath に依存しない
+add_executable(MathCompareTests tests/MathCompareTests.cpp)
+target_link_libraries(MathCompareTests PRIVATE Math)
+add_test(NAME MathCompareTests COMMAND MathCompareTests)
