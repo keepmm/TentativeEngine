@@ -76,6 +76,7 @@ enum class ERHIBackend : uint8_t
 	D3D11,
 	D3D12,
 	Vulkan,
+	// OpenGL
 	// Metal
 };
 

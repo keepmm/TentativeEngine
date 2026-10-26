@@ -73,6 +73,43 @@ target_include_directories(RHI PUBLIC src)
 # dxguid : IID_* の GUID 定義
 target_link_libraries(RHI PRIVATE d3d11 d3d12 dxgi dxguid)
 
+# ---- Vulkan バックエンド（任意）----
+# Vulkan SDK が入っていれば組み込む。なければ D3D11 / D3D12 だけでビルドする（依存を必須にしないため）。
+# dxc は HLSL を SPIR-V にコンパイルするのに使う（SDK に同梱）
+find_package(Vulkan QUIET)
+option(TE_ENABLE_VULKAN "Vulkan バックエンドを組み込む（Vulkan SDK が必要）" ${Vulkan_FOUND})
+if(TE_ENABLE_VULKAN)
+    # dxc は SDK の Lib / Bin にある。SDK には Debug 用の dxcompilerd.lib がないが、
+    # dxc は C の関数で呼ぶ DLL なので、Release 用の dxcompiler.lib を Debug でもそのまま使える
+    get_filename_component(TE_VULKAN_SDK_DIR "${Vulkan_INCLUDE_DIRS}" DIRECTORY)
+    find_library(TE_DXC_LIBRARY dxcompiler HINTS "${TE_VULKAN_SDK_DIR}/Lib" NO_DEFAULT_PATH)
+    find_file(TE_DXC_DLL dxcompiler.dll HINTS "${TE_VULKAN_SDK_DIR}/Bin" NO_DEFAULT_PATH)
+    if(NOT Vulkan_FOUND OR NOT TE_DXC_LIBRARY OR NOT TE_DXC_DLL)
+        message(FATAL_ERROR "TE_ENABLE_VULKAN が ON ですが、Vulkan SDK（dxc を含む）が見つかりません")
+    endif()
+    target_sources(RHI PRIVATE
+        src/RHI/Vulkan/VulkanTypes.hpp
+        src/RHI/Vulkan/VulkanFence.hpp
+        src/RHI/Vulkan/VulkanDevice.hpp
+        src/RHI/Vulkan/VulkanDevice.cpp
+        src/RHI/Vulkan/VulkanResource.hpp
+        src/RHI/Vulkan/VulkanResource.cpp
+        src/RHI/Vulkan/VulkanCommandList.hpp
+        src/RHI/Vulkan/VulkanCommandList.cpp
+        src/RHI/Vulkan/VulkanDescriptorTable.hpp
+        src/RHI/Vulkan/VulkanDescriptorTable.cpp
+        src/RHI/Vulkan/VulkanPipeline.hpp
+        src/RHI/Vulkan/VulkanPipeline.cpp
+        src/RHI/Vulkan/VulkanSwapChain.hpp
+        src/RHI/Vulkan/VulkanSwapChain.cpp
+    )
+    # TE_RHI_VULKAN は RHI を使う側（Renderer の SPIR-V コンパイル）も見るので PUBLIC にする
+    target_compile_definitions(RHI PUBLIC TE_RHI_VULKAN=1)
+    target_link_libraries(RHI PRIVATE Vulkan::Vulkan)
+    message(STATUS "Vulkan バックエンド: 有効 (${Vulkan_VERSION})")
+else()
+    message(STATUS "Vulkan バックエンド: 無効")
+endif()
 
 # ---- 本体 ----
 add_executable(TentativeEngine WIN32
@@ -135,6 +172,16 @@ target_include_directories(TentativeEngine PRIVATE src)
 
 # d3dcompiler : 実行時の HLSL コンパイル（ShaderCompiler.cpp だけが使う）
 target_link_libraries(TentativeEngine PRIVATE RHI d3dcompiler)
+
+if(TE_ENABLE_VULKAN)
+    # Vulkan 用に HLSL を SPIR-V へコンパイルする dxc（ShaderCompiler.cpp だけが使う）
+    target_include_directories(TentativeEngine PRIVATE ${Vulkan_INCLUDE_DIRS})
+    target_link_libraries(TentativeEngine PRIVATE "${TE_DXC_LIBRARY}")
+    # dxc は実行時に dxcompiler.dll を読むので、exe の隣にコピーしておく（PATH に頼らない）
+    add_custom_command(TARGET TentativeEngine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TE_DXC_DLL}" $<TARGET_FILE_DIR:TentativeEngine>
+    )
+endif()
 
 # ---- Math ----
 # ヘッダだけのライブラリ。何にも依存しない。使う側は target_link_libraries(... Math)
