@@ -73,6 +73,7 @@ target_include_directories(RHI PUBLIC src)
 # dxguid : IID_* の GUID 定義
 target_link_libraries(RHI PRIVATE d3d11 d3d12 dxgi dxguid)
 
+
 # ---- 本体 ----
 add_executable(TentativeEngine WIN32
     src/main.cpp
@@ -86,8 +87,11 @@ add_executable(TentativeEngine WIN32
 
     src/Renderer/ShaderCompiler.hpp
     src/Renderer/ShaderCompiler.cpp
+    src/Renderer/MeshRenderer.hpp
     src/Renderer/Renderer.hpp
     src/Renderer/Renderer.cpp
+    src/Renderer/RenderSystem.cpp
+    src/Renderer/RenderSystem.hpp
 
     src/Engine/Engine.hpp
     src/Engine/Engine.cpp
@@ -111,6 +115,20 @@ add_executable(TentativeEngine WIN32
     src/Math/Intersection.hpp
     src/Math/Frustum.hpp
     src/Math/Half.hpp
+
+    src/ECS/Entity.hpp
+    src/ECS/ComponentType.hpp
+    src/ECS/ArcheType.hpp
+    src/ECS/World.hpp
+    src/ECS/ECS.hpp
+
+    src/Game/Spin.hpp
+
+    src/Scene/Transform.hpp
+    src/Scene/TransformSystem.hpp
+    src/Scene/Camera.hpp
+
+ 
 )
 
 target_include_directories(TentativeEngine PRIVATE src)
