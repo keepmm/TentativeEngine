@@ -37,8 +37,20 @@ namespace {
     //   スロット 0（頂点ごと）    : 位置・法線
     //   スロット 1（インスタンスごと）: ワールド行列・色。1 個描くごとに次の要素へ進む
     // これで同じメッシュを、行列だけ変えて 1 回の DrawIndexed でまとめて描ける（インスタンシング）
+    // Vulkan（SPIR-V）のときだけ __spirv__ が定義されるので、Vulkan 用の注釈はそのときだけ付ける。
+    //   VK_BINDING(b, s) : RHI の Vulkan バックエンドは「レイアウトのスロット番号 = set」「レジスタ番号 = binding」
+    //   VK_LOCATION(n)   : 頂点属性は vertexAttributes に並べた順番が location になる
+    //   ※ マクロの引数名を binding / location にすると、属性名の vk::binding まで置き換わって壊れる
     constexpr char kMeshShader[] = R"(
-cbuffer FrameConstants : register(b0)
+#ifdef __spirv__
+#define VK_BINDING(b, s) [[vk::binding(b, s)]]
+#define VK_LOCATION(n)   [[vk::location(n)]]
+#else
+#define VK_BINDING(b, s)
+#define VK_LOCATION(n)
+#endif
+
+VK_BINDING(0, 0) cbuffer FrameConstants : register(b0)
 {
     float4x4 g_ViewProjection;  // C++ 側で Transposed() してある（cbuffer は列優先で読むため）
     float4   g_LightDirection;
@@ -46,13 +58,13 @@ cbuffer FrameConstants : register(b0)
 
 struct VSInput
 {
-    float3 position : POSITION;
-    float3 normal   : NORMAL;
-    float4 world0   : WORLD0;
-    float4 world1   : WORLD1;
-    float4 world2   : WORLD2;
-    float4 world3   : WORLD3;
-    float4 color    : COLOR;
+    VK_LOCATION(0) float3 position : POSITION;
+    VK_LOCATION(1) float3 normal   : NORMAL;
+    VK_LOCATION(2) float4 world0   : WORLD0;
+    VK_LOCATION(3) float4 world1   : WORLD1;
+    VK_LOCATION(4) float4 world2   : WORLD2;
+    VK_LOCATION(5) float4 world3   : WORLD3;
+    VK_LOCATION(6) float4 color    : COLOR;
 };
 
 struct PSInput
@@ -362,8 +374,10 @@ void Renderer::CreateDepthBuffer(std::uint32_t width, std::uint32_t height) {
 
 void Renderer::CreatePipeline() {
     const std::string source = kMeshShader;
-    const auto vs = ShaderCompiler::Compile(source, "MeshVS", "VSMain", "vs_5_0");
-    const auto ps = ShaderCompiler::Compile(source, "MeshPS", "PSMain", "ps_5_0");
+    // バックエンドに合わせて DXBC（D3D）か SPIR-V（Vulkan）を作る
+    const ERHIBackend backend = m_Device->GetBackend();
+    const auto vs = ShaderCompiler::Compile(source, "MeshVS", "VSMain", ShaderCompiler::Stage::Vertex, backend);
+    const auto ps = ShaderCompiler::Compile(source, "MeshPS", "PSMain", ShaderCompiler::Stage::Pixel, backend);
     if (vs.empty() || ps.empty()) {
         throw std::runtime_error("メッシュのシェーダーのコンパイルに失敗しました");
     }
