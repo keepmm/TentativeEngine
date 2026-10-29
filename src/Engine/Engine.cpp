@@ -23,7 +23,7 @@ namespace {
 Engine::Engine(HINSTANCE instance)
     : m_Window(instance, L"TentativeEngine", kInitialWidth, kInitialHeight) {
     m_Renderer = std::make_unique<Renderer>(
-        ERHIBackend::D3D12, m_Window.GetHandle(), m_Window.GetWidth(), m_Window.GetHeight());
+        ERHIBackend::Vulkan, m_Window.GetHandle(), m_Window.GetWidth(), m_Window.GetHeight());
 
     // Window は 0 サイズを通知しない（最小化はフラグだけ立てる）ので、そのまま渡してよい
     m_Window.SetResizeCallback([this](UINT width, UINT height) {
