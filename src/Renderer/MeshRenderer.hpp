@@ -20,6 +20,18 @@ namespace TE
 		constexpr bool IsValid() const { return index != std::numeric_limits<std::uint32_t>::max(); }
 	};
 
+	struct TextureHandle
+	{
+		std::uint32_t index = std::numeric_limits<std::uint32_t>::max();
+		constexpr bool IsValid() const { return index != std::numeric_limits<std::uint32_t>::max(); }
+	};
+
+	struct MaterialHandle
+	{
+		std::uint32_t index = std::numeric_limits<std::uint32_t>::max();
+		constexpr bool IsValid() const { return index != std::numeric_limits<std::uint32_t>::max(); }
+	};
+
 	struct MeshRenderer
 	{
 		MeshHandle mesh;

@@ -121,12 +121,16 @@ add_executable(TentativeEngine WIN32
 
     src/Platform/Window.hpp
     src/Platform/Window.cpp
+    src/Platform/Input.hpp
+    src/Platform/Input.cpp
 
     src/Renderer/ShaderCompiler.hpp
     src/Renderer/ShaderCompiler.cpp
     src/Renderer/MeshRenderer.hpp
     src/Renderer/Renderer.hpp
     src/Renderer/Renderer.cpp
+    src/Renderer/ModelUpload.hpp
+    src/Renderer/ModelUpload.cpp
     src/Renderer/RenderSystem.cpp
     src/Renderer/RenderSystem.hpp
 
@@ -164,14 +168,18 @@ add_executable(TentativeEngine WIN32
     src/Scene/Transform.hpp
     src/Scene/TransformSystem.hpp
     src/Scene/Camera.hpp
+    src/Scene/OrbitCamera.hpp
 
- 
+    src/Asset/ModelData.hpp
+    src/Asset/ModelImporter.hpp
+    src/Asset/ModelImporter.cpp
 )
 
 target_include_directories(TentativeEngine PRIVATE src)
 
 # d3dcompiler : 実行時の HLSL コンパイル（ShaderCompiler.cpp だけが使う）
-target_link_libraries(TentativeEngine PRIVATE RHI d3dcompiler)
+# xinput      : ゲームパッド（Input.cpp だけが使う）
+target_link_libraries(TentativeEngine PRIVATE RHI d3dcompiler xinput)
 
 if(TE_ENABLE_VULKAN)
     # Vulkan 用に HLSL を SPIR-V へコンパイルする dxc（ShaderCompiler.cpp だけが使う）
@@ -182,6 +190,33 @@ if(TE_ENABLE_VULKAN)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TE_DXC_DLL}" $<TARGET_FILE_DIR:TentativeEngine>
     )
 endif()
+
+# ---- 外部ライブラリ（ビルド済み。ModelViewer の external/ をコピーしたもの）----
+# assimp     : FBX / glTF / OBJ などのモデル読み込み（DLL）
+# DirectXTex : 画像のデコードとミップマップ生成（静的ライブラリ）
+# Debug 以外（Release / RelWithDebInfo / MinSizeRel）は Release 版を使う。
+# CRT（/MDd と /MD）を混ぜるとリンクエラーや実行時の不具合になるので、構成で選び分ける
+set(TE_EXTERNAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external)
+set(TE_EXTERNAL_CONFIG $<IF:$<CONFIG:Debug>,Debug,Release>)
+set(TE_ASSIMP_NAME $<IF:$<CONFIG:Debug>,assimp-vc142-mtd,assimp-vc142-mt>)
+
+# SYSTEM: 外部ヘッダの警告は /W4 の対象にしない
+target_include_directories(TentativeEngine SYSTEM PRIVATE
+    ${TE_EXTERNAL_DIR}/assimp/include
+    ${TE_EXTERNAL_DIR}/DirectXTex/include
+)
+# ole32 : WIC（DirectXTex の png / jpg 読み込み）が使う COM
+target_link_libraries(TentativeEngine PRIVATE
+    ${TE_EXTERNAL_DIR}/assimp/lib/${TE_EXTERNAL_CONFIG}/${TE_ASSIMP_NAME}.lib
+    ${TE_EXTERNAL_DIR}/DirectXTex/lib/${TE_EXTERNAL_CONFIG}/DirectXTex.lib
+    ole32
+)
+# assimp は DLL なので exe の隣に置く（PATH に頼らない）
+add_custom_command(TARGET TentativeEngine POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${TE_EXTERNAL_DIR}/assimp/lib/${TE_EXTERNAL_CONFIG}/${TE_ASSIMP_NAME}.dll
+        $<TARGET_FILE_DIR:TentativeEngine>
+)
 
 # ---- Math ----
 # ヘッダだけのライブラリ。何にも依存しない。使う側は target_link_libraries(... Math)

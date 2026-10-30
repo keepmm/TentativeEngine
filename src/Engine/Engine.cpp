@@ -4,12 +4,16 @@
  */
 #include "Engine/Engine.hpp"
 
+#include "Asset/ModelImporter.hpp"
+#include "Core/Log.hpp"
 #include "Game/Spin.hpp"
 #include "Math/Math.hpp"
 #include "Renderer/MeshRenderer.hpp"
+#include "Renderer/ModelUpload.hpp"
 #include "Renderer/RenderSystem.hpp"
 #include "Renderer/Renderer.hpp"
 #include "Scene/Camera.hpp"
+#include "Scene/OrbitCamera.hpp"
 #include "Scene/Transform.hpp"
 #include "Scene/TransformSystem.hpp"
 
@@ -18,6 +22,23 @@ using namespace TE;
 namespace {
     constexpr UINT kInitialWidth = 1280;
     constexpr UINT kInitialHeight = 720;
+
+    // 動作確認用のモデル。DirectX12__test の素材をそのまま読む
+    constexpr const wchar_t* kSampleModelPath =
+        L"C:/HAL/study/DirectX12__test/DirectX12__test/Assets/Model/spot/spot.fbx";
+    constexpr float kSampleModelScale = 1.0f;
+
+    // 頂点をすべて囲む箱（モデルの空間）。カメラを向ける範囲を決めるのに使う
+    Bounds ComputeBounds(const ModelCpuData& model) {
+        if (model.vertices.empty()) {
+            return {};
+        }
+        Bounds bounds{ model.vertices[0].position, Vector3{} };
+        for (const ModelVertex& vertex : model.vertices) {
+            bounds.Encapsulate(vertex.position);
+        }
+        return bounds;
+    }
 }
 
 Engine::Engine(HINSTANCE instance)
@@ -40,8 +61,12 @@ Engine::~Engine() {
 }
 
 void Engine::Run() {
-    while (m_Window.PumpMessages()) {
+    for (;;) {
         const double deltaSeconds = m_Timer.Tick();
+        // 入力のフレームの区切りも PumpMessages の中で行う（パッドの再接続の間隔に時間を使う）
+        if (!m_Window.PumpMessages(static_cast<float>(deltaSeconds))) {
+            break;
+        }
 
         // 最小化中はバックバッファが 0 サイズになるので描かない
         if (m_Window.IsMinimized()) {
@@ -53,8 +78,9 @@ void Engine::Run() {
 }
 
 void Engine::Update(float deltaSeconds) {
-    // 順番に意味がある: 動かす → 行列を計算する → 描くものを集める → GPU へ送る → 予約した変更を反映する
+    // 順番に意味がある: 動かす（カメラは入力で）→ 行列を計算する → 描くものを集める → GPU へ送る → 予約した変更を反映する
     SpinSystem(m_World, deltaSeconds);
+    OrbitCameraSystem(m_World, m_Window.GetInput());
     TransformSystem(m_World);
     RenderSystem(m_World, *m_Renderer);
     m_Renderer->Render();
@@ -62,12 +88,6 @@ void Engine::Update(float deltaSeconds) {
 }
 
 void Engine::CreateSampleScene() {
-    // カメラ: 斜め上から原点を見下ろす
-    const Vector3 cameraPosition{ 0.0f, 8.0f, -16.0f };
-    m_World.CreateEntity(
-        Transform{ cameraPosition, Quaternion::LookRotation(Vector3::zero - cameraPosition) },
-        Camera{});
-
     // 立方体を 11 × 11 に並べる。場所によって色と回る速さを変える
     const MeshHandle cube = m_Renderer->CubeMesh();
     constexpr int kHalf = 5;
@@ -84,4 +104,31 @@ void Engine::CreateSampleScene() {
                 Spin{ Vector3{ 0.3f, 1.0f, 0.0f }.Normalized(), speed });
         }
     }
+
+    // カメラを向ける範囲。モデルが読めなかったときは立方体の並び全体（11 個 × 1.5 間隔 ≒ 16.5）
+    Bounds focus = Bounds::FromCenterSize(Vector3::zero, Vector3{ 16.5f, 2.0f, 16.5f });
+
+    // 読み込んだモデルを立方体の上に 1 つ置く。読めなくても立方体は描けるので、ログだけ出して続ける
+    if (const auto model = ImportModel(kSampleModelPath, kSampleModelScale)) {
+        const Vector3 modelPosition{ 0.0f, 3.0f, 0.0f };
+        const MeshHandle modelMesh = CreateMeshFromModel(*m_Renderer, *model);
+        m_World.CreateEntity(
+            Transform{ modelPosition, Quaternion::Euler(0.0f, 0.0f, 0.0f), Vector3::one },
+            LocalToWorld{},
+            MeshRenderer{ modelMesh, Color::white },
+            Spin{ Vector3::up, 30.0f });
+
+        // 置いた位置へずらすだけでよい（拡大率は 1）。Spin で回ると箱も少しずれるが、カメラを向ける目安なので気にしない
+        focus = ComputeBounds(*model);
+        focus.center += modelPosition;
+    } else {
+        LogError("[Engine] サンプルモデルの読み込みに失敗しました");
+    }
+
+    // カメラ: 正面（-Z 側）の少し上から見下ろし、focus 全体が画面に入る距離に置く。
+    // Transform は OrbitCameraSystem が毎フレーム上書きするので、最初の値は何でもよい
+    OrbitCamera orbit;
+    orbit.view = FrameBounds(focus, 0.0f, 25.0f, orbit);
+    orbit.home = orbit.view;
+    m_World.CreateEntity(Transform{}, Camera{}, orbit);
 }

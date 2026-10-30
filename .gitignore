@@ -6,5 +6,9 @@ build/
 .vs/
 *.user
 
+# ビルド済みの外部ライブラリ（assimp / DirectXTex）。約 30MB あるのでリポジトリには入れない。
+# clone した後は ModelViewer の external/ をここへコピーする
+external/
+
 # Claude Code の個人用設定
 .claude/settings.local.json

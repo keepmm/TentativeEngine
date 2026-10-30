@@ -50,7 +50,10 @@ Window::~Window() {
     }
 }
 
-bool Window::PumpMessages() {
+bool Window::PumpMessages(float deltaSeconds) {
+    // 先に前フレームの状態を保存してから、このフレームに届いたメッセージで今の状態にする
+    m_Input.BeginFrame(deltaSeconds);
+
     // PeekMessage は待たずに戻るので、メッセージがなくてもフレームを回せる。
     // GetMessage だと次のメッセージが来るまでブロックしてしまう
     MSG msg{};
@@ -83,7 +86,27 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 }
 
 LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // 入力はまず Input に記録だけさせる。WM_SYSKEYDOWN（Alt+F4 など）は DefWindowProc まで流さないと
+    // ウィンドウが閉じられなくなるので、ここでは return しない
+    m_Input.OnMessage(msg, wParam, lParam);
+
     switch (msg) {
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        // ドラッグ中にカーソルがウィンドウの外へ出ても、離すまでマウスのメッセージを受け取り続ける
+        if (GetCapture() != hwnd) {
+            SetCapture(hwnd);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONUP:
+        // 全部のボタンを離したときだけ外す（左右を同時押しして片方だけ離したときに外れないように）
+        if (!m_Input.AnyMouseButton() && GetCapture() == hwnd) {
+            ReleaseCapture();
+        }
+        return 0;
     case WM_SIZE: {
         // 最小化時は幅・高さが 0 で届く。0 サイズでスワップチェインを作ると失敗するので、
         // フラグだけ立てて、描画の停止は Engine 側に任せる
