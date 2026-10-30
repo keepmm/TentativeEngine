@@ -7,6 +7,7 @@
 #include "Core/Log.hpp"
 #include "Math/Math.hpp"
 #include "Renderer/ShaderCompiler.hpp"
+#include "Renderer/ShaderWatcher.hpp"
 #include "RHI/IRHIBuffer.hpp"
 #include "RHI/IRHICommandList.hpp"
 #include "RHI/IRHIDescriptorTable.hpp"
@@ -53,126 +54,14 @@ namespace {
     // 定数バッファは 256 バイト単位（D3D12 の決まり）
     constexpr std::uint64_t kConstantBufferSize = 256;
 
-    // 頂点は 2 本の頂点バッファから読む。
-    //   スロット 0（頂点ごと）    : 位置・法線
-    //   スロット 1（インスタンスごと）: ワールド行列・色。1 個描くごとに次の要素へ進む
-    // これで同じメッシュを、行列だけ変えて 1 回の DrawIndexed でまとめて描ける（インスタンシング）
-    // Vulkan（SPIR-V）のときだけ __spirv__ が定義されるので、Vulkan 用の注釈はそのときだけ付ける。
-    //   VK_BINDING(b, s) : RHI の Vulkan バックエンドは「レイアウトのスロット番号 = set」「レジスタ番号 = binding」
-    //   VK_LOCATION(n)   : 頂点属性は vertexAttributes に並べた順番が location になる
-    //   ※ マクロの引数名を binding / location にすると、属性名の vk::binding まで置き換わって壊れる
-    constexpr char kMeshShader[] = R"(
-#ifdef __spirv__
-#define VK_BINDING(b, s) [[vk::binding(b, s)]]
-#define VK_LOCATION(n)   [[vk::location(n)]]
-#else
-#define VK_BINDING(b, s)
-#define VK_LOCATION(n)
-#endif
-
-VK_BINDING(0, 0) cbuffer FrameConstants : register(b0)
-{
-    float4x4 g_ViewProjection;  // C++ 側で Transposed() してある（cbuffer は列優先で読むため）
-    float4   g_LightDirection;
-};
-
-// マテリアル。スロット 2 なので Vulkan では set 2
-VK_BINDING(2, 2) cbuffer MaterialConstants : register(b2)
-{
-    float4 g_BaseColorFactor;
-    float4 g_EmissiveFactor;
-};
-
-// テクスチャはスロット 1 のテーブル（Vulkan では set 1、binding = レジスタ番号）。
-// sRGB の画像（ベースカラー・エミッシブ）は、読んだ時点でリニアな値になっている
-VK_BINDING(0, 1) Texture2D g_BaseColorMap : register(t0);
-VK_BINDING(1, 1) Texture2D g_NormalMap    : register(t1);
-VK_BINDING(2, 1) Texture2D g_EmissiveMap  : register(t2);
-// 静的サンプラーは、Vulkan では set 0 の binding 100 + レジスタ番号に入る（RHI の決まり）
-VK_BINDING(100, 0) SamplerState g_Sampler : register(s0);
-
-struct VSInput
-{
-    VK_LOCATION(0) float3 position : POSITION;
-    VK_LOCATION(1) float3 normal   : NORMAL;
-    VK_LOCATION(2) float2 uv       : TEXCOORD0;
-    VK_LOCATION(3) float3 tangent  : TANGENT;
-    VK_LOCATION(4) float4 world0   : WORLD0;
-    VK_LOCATION(5) float4 world1   : WORLD1;
-    VK_LOCATION(6) float4 world2   : WORLD2;
-    VK_LOCATION(7) float4 world3   : WORLD3;
-    VK_LOCATION(8) float4 color    : COLOR;
-};
-
-struct PSInput
-{
-    float4 position : SV_Position;
-    float3 normal   : NORMAL;
-    float2 uv       : TEXCOORD0;
-    float3 tangent  : TANGENT;
-    float4 color    : COLOR;
-};
-
-PSInput VSMain(VSInput input)
-{
-    // 4 つの行を並べると、C++ の Matrix4x4（m[行][列]）と同じ並びの行列になる。転置はいらない
-    const float4x4 world = float4x4(input.world0, input.world1, input.world2, input.world3);
-
-    PSInput output;
-    const float4 worldPosition = mul(float4(input.position, 1.0f), world);
-    output.position = mul(worldPosition, g_ViewProjection);
-    // 向きなので w = 0。拡大率が軸ごとに違う物体を扱うときは、法線用の行列（NormalMatrix）に替える
-    output.normal  = mul(float4(input.normal, 0.0f), world).xyz;
-    output.tangent = mul(float4(input.tangent, 0.0f), world).xyz;
-    output.uv      = input.uv;
-    output.color   = input.color;
-    return output;
-}
-
-float4 PSMain(PSInput input) : SV_Target
-{
-    // テクスチャは分岐の外で読む（分岐の中だと、ミップを選ぶための微分が正しく取れない）
-    const float4 baseColorTex = g_BaseColorMap.Sample(g_Sampler, input.uv);
-    const float3 normalTex    = g_NormalMap.Sample(g_Sampler, input.uv).xyz;
-    const float3 emissiveTex  = g_EmissiveMap.Sample(g_Sampler, input.uv).rgb;
-
-    // ---- 法線マップ ----
-    // 補間すると法線と接線が直交しなくなるので、接線から法線方向の成分を取り除く（グラム・シュミット）
-    float3 normal = normalize(input.normal);
-    float3 tangent = input.tangent - normal * dot(input.tangent, normal);
-    // 接線を持たないモデル（長さ 0）では、法線マップを使わず頂点の法線のままにする
-    if (dot(tangent, tangent) > 1e-8f)
-    {
-        tangent = normalize(tangent);
-        // 左手系なので cross(法線, 接線) が V の増える向き（画像の下向き）になる。DirectX 形式の法線マップに合う
-        const float3 bitangent = cross(normal, tangent);
-        // 画像の 0〜1 を -1〜1 に戻し、接空間（T, B, N）からワールド空間へ
-        const float3 n = normalTex * 2.0f - 1.0f;
-        normal = normalize(n.x * tangent + n.y * bitangent + n.z * normal);
-    }
-
-    // ---- 色 ----
-    // ベースカラー = テクスチャ × マテリアルの係数 × 物体ごとの色（MeshRenderer）
-    const float4 baseColor = baseColorTex * g_BaseColorFactor * input.color;
-    const float3 emissive  = emissiveTex * g_EmissiveFactor.rgb;
-
-    // ランバート反射: 面が光の来る方を向いているほど明るい。真っ暗にならないよう環境光を少し足す
-    const float diffuse = saturate(dot(normal, -g_LightDirection.xyz));
-    float3 color = baseColor.rgb * (0.25f + 0.75f * diffuse) + emissive;
-
-    // ここまではリニアな値で計算した。スワップチェインは UNORM で sRGB 変換をしないので、
-    // 画面に出す前にガンマ補正する（しないと暗く見える）
-    color = pow(saturate(color), 1.0f / 2.2f);
-    return float4(color, baseColor.a);
-}
-)";
-
     constexpr ERHIFormat kDepthFormat = ERHIFormat::D32_FLOAT;
     constexpr std::size_t kInitialInstanceCapacity = 1024;
 
 }  // namespace
 
-Renderer::Renderer(ERHIBackend backend, void* windowHandle, std::uint32_t width, std::uint32_t height) {
+Renderer::Renderer(ERHIBackend backend, void* windowHandle, std::uint32_t width, std::uint32_t height,
+                   std::filesystem::path shaderDirectory)
+    : m_ShaderDirectory(std::move(shaderDirectory)) {
     RHIDeviceDesc deviceDesc{};
     deviceDesc.backend = backend;
     deviceDesc.frameInFlight = kFramesInFlight;
@@ -206,7 +95,15 @@ Renderer::Renderer(ERHIBackend backend, void* windowHandle, std::uint32_t width,
     }
 
     CreateDepthBuffer(width, height);
-    CreatePipeline();
+    // レイアウトは作り直さない（マテリアルのデスクリプタテーブルがこれに結び付いているため）。
+    // PSO はシェーダーを保存するたびに作り直す
+    CreatePipelineLayout();
+    m_Pipeline = BuildPipelineState();
+    if (!m_Pipeline) {
+        // 起動時は差し替える前の PSO が無いので、描けない。中身は出力ウィンドウのエラーを見る
+        throw std::runtime_error("メッシュのパイプラインの生成に失敗しました");
+    }
+    m_ShaderWatcher = std::make_unique<ShaderWatcher>(m_ShaderDirectory);
     CreateConstantBuffer();
     EnsureInstanceCapacity(kInitialInstanceCapacity);
     // 立方体は既定のマテリアルを使うので、こちらを先に作る
@@ -233,6 +130,18 @@ void Renderer::Resize(std::uint32_t width, std::uint32_t height) {
     }
     // 深度バッファもバックバッファと同じ大きさでないと使えない
     CreateDepthBuffer(width, height);
+}
+
+void Renderer::PollShaderReload(float deltaSeconds) {
+    if (!m_ShaderWatcher->Poll(deltaSeconds)) {
+        return;
+    }
+    // 失敗したら古い PSO のまま描き続ける。直して保存すれば、もう一度ここに来る
+    if (RHIPipelineStateRef pipeline = BuildPipelineState()) {
+        // 古い PSO は手放すだけでよい。GPU が使い終わるまでは RHI の遅延解放で残る
+        m_Pipeline = std::move(pipeline);
+        LogInfo("[Renderer] シェーダーを読み直しました");
+    }
 }
 
 float Renderer::AspectRatio() const {
@@ -587,16 +496,7 @@ void Renderer::CreateDepthBuffer(std::uint32_t width, std::uint32_t height) {
     m_DepthNeedsTransition = true;
 }
 
-void Renderer::CreatePipeline() {
-    const std::string source = kMeshShader;
-    // バックエンドに合わせて DXBC（D3D）か SPIR-V（Vulkan）を作る
-    const ERHIBackend backend = m_Device->GetBackend();
-    const auto vs = ShaderCompiler::Compile(source, "MeshVS", "VSMain", ShaderCompiler::Stage::Vertex, backend);
-    const auto ps = ShaderCompiler::Compile(source, "MeshPS", "PSMain", ShaderCompiler::Stage::Pixel, backend);
-    if (vs.empty() || ps.empty()) {
-        throw std::runtime_error("メッシュのシェーダーのコンパイルに失敗しました");
-    }
-
+void Renderer::CreatePipelineLayout() {
     // 添字がスロット番号（kFrameConstantsSlot など）。D3D11 では定数バッファのスロット番号がそのままレジスタ番号になるので揃えておく
     RHIPipelineLayoutDesc layoutDesc{};
     layoutDesc.slots = {
@@ -619,6 +519,17 @@ void Renderer::CreatePipeline() {
     m_PipelineLayout = m_Device->CreatePipelineLayout(layoutDesc);
     if (!m_PipelineLayout) {
         throw std::runtime_error("パイプラインレイアウトの生成に失敗しました");
+    }
+}
+
+RHIPipelineStateRef Renderer::BuildPipelineState() {
+    // バックエンドに合わせて DXBC（D3D）か SPIR-V（Vulkan）を作る
+    const std::filesystem::path path = m_ShaderDirectory / kMeshShaderFile;
+    const ERHIBackend backend = m_Device->GetBackend();
+    const auto vs = ShaderCompiler::CompileFile(path, "VSMain", ShaderCompiler::Stage::Vertex, backend);
+    const auto ps = ShaderCompiler::CompileFile(path, "PSMain", ShaderCompiler::Stage::Pixel, backend);
+    if (vs.empty() || ps.empty()) {
+        return nullptr;  // エラーの中身は ShaderCompiler がログに出している
     }
 
     RHIGraphicsPipelineDesc psoDesc{};
@@ -653,10 +564,11 @@ void Renderer::CreatePipeline() {
     psoDesc.rtvFormat[0] = m_SwapChain->GetFormat();
     psoDesc.debugName = "MeshPSO";
 
-    m_Pipeline = m_Device->CreatePipelineState(psoDesc);
-    if (!m_Pipeline) {
-        throw std::runtime_error("PSO の生成に失敗しました");
+    RHIPipelineStateRef pipeline = m_Device->CreatePipelineState(psoDesc);
+    if (!pipeline) {
+        LogError("[Renderer] PSO の生成に失敗しました");
     }
+    return pipeline;
 }
 
 void Renderer::CreateConstantBuffer() {

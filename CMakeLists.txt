@@ -111,6 +111,15 @@ else()
     message(STATUS "Vulkan バックエンド: 無効")
 endif()
 
+# ---- シェーダー ----
+# 実行時に ShaderCompiler がファイルから読んでコンパイルする（ホットリロードのため）。
+# add_executable に入れるのは IDE に表示するためだけ。HEADER_FILE_ONLY を付けないと、
+# VS がビルド時に FXC でコンパイルしようとして「missing entry point」で失敗する
+set(TE_SHADER_FILES
+    shaders/Mesh.hlsl
+)
+set_source_files_properties(${TE_SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
+
 # ---- 本体 ----
 add_executable(TentativeEngine WIN32
     src/main.cpp
@@ -123,9 +132,11 @@ add_executable(TentativeEngine WIN32
     src/Platform/Window.cpp
     src/Platform/Input.hpp
     src/Platform/Input.cpp
+    src/Platform/Paths.hpp
 
     src/Renderer/ShaderCompiler.hpp
     src/Renderer/ShaderCompiler.cpp
+    src/Renderer/ShaderWatcher.hpp
     src/Renderer/MeshRenderer.hpp
     src/Renderer/Renderer.hpp
     src/Renderer/Renderer.cpp
@@ -173,6 +184,8 @@ add_executable(TentativeEngine WIN32
     src/Asset/ModelData.hpp
     src/Asset/ModelImporter.hpp
     src/Asset/ModelImporter.cpp
+
+    ${TE_SHADER_FILES}
 )
 
 target_include_directories(TentativeEngine PRIVATE src)
@@ -216,6 +229,17 @@ add_custom_command(TARGET TentativeEngine POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${TE_EXTERNAL_DIR}/assimp/lib/${TE_EXTERNAL_CONFIG}/${TE_ASSIMP_NAME}.dll
         $<TARGET_FILE_DIR:TentativeEngine>
+)
+
+# ---- 配布用のコピー（Debug 以外）----
+# shaders と assets を exe の横に置き、Release のフォルダだけ持っていけば別の PC で動くようにする。
+# Debug はコピーしない。コピーがあると exe から探したときにそちらが先に見つかり、
+# ソースツリーのシェーダーを直してもホットリロードされなくなるため
+add_custom_command(TARGET TentativeEngine POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Debug>,true,copy_directory>
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders $<TARGET_FILE_DIR:TentativeEngine>/shaders
+    COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Debug>,true,copy_directory>
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:TentativeEngine>/assets
 )
 
 # ---- Math ----

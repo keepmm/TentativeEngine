@@ -8,6 +8,7 @@
 #include "Core/Log.hpp"
 #include "Game/Spin.hpp"
 #include "Math/Math.hpp"
+#include "Platform/Paths.hpp"
 #include "Renderer/MeshRenderer.hpp"
 #include "Renderer/ModelUpload.hpp"
 #include "Renderer/RenderSystem.hpp"
@@ -17,15 +18,19 @@
 #include "Scene/Transform.hpp"
 #include "Scene/TransformSystem.hpp"
 
+#include <filesystem>
+#include <optional>
+#include <stdexcept>
+#include <string>
+
 using namespace TE;
 
 namespace {
     constexpr UINT kInitialWidth = 1280;
     constexpr UINT kInitialHeight = 720;
 
-    // 動作確認用のモデル。DirectX12__test の素材をそのまま読む
-    constexpr const wchar_t* kSampleModelPath =
-        L"C:/HAL/study/DirectX12__test/DirectX12__test/Assets/Model/spot/spot.fbx";
+    // 動作確認用のモデル。assets フォルダの中の場所（assets は exe の場所からさかのぼって探す）
+    constexpr const char* kSampleModelFile = "models/spot/spot.fbx";
     constexpr float kSampleModelScale = 1.0f;
 
     // 頂点をすべて囲む箱（モデルの空間）。カメラを向ける範囲を決めるのに使う
@@ -43,8 +48,14 @@ namespace {
 
 Engine::Engine(HINSTANCE instance)
     : m_Window(instance, L"TentativeEngine", kInitialWidth, kInitialHeight) {
+    // シェーダーは exe の場所から親へさかのぼって探す。
+    // 開発中はソースツリーの shaders/（保存すればそのまま反映される）、配布時は exe の横の shaders/ が見つかる
+    const std::filesystem::path shaderDirectory = FindDirectoryUpward("shaders", Renderer::kMeshShaderFile);
+    if (shaderDirectory.empty()) {
+        throw std::runtime_error("shaders フォルダが見つかりません（exe の横か、その親のどこかに置く）");
+    }
     m_Renderer = std::make_unique<Renderer>(
-        ERHIBackend::Vulkan, m_Window.GetHandle(), m_Window.GetWidth(), m_Window.GetHeight());
+        ERHIBackend::Vulkan, m_Window.GetHandle(), m_Window.GetWidth(), m_Window.GetHeight(), shaderDirectory);
 
     // Window は 0 サイズを通知しない（最小化はフラグだけ立てる）ので、そのまま渡してよい
     m_Window.SetResizeCallback([this](UINT width, UINT height) {
@@ -82,6 +93,8 @@ void Engine::Update(float deltaSeconds) {
     SpinSystem(m_World, deltaSeconds);
     OrbitCameraSystem(m_World, m_Window.GetInput());
     TransformSystem(m_World);
+    // 描く前に、保存されたシェーダーがあれば PSO を作り直しておく
+    m_Renderer->PollShaderReload(deltaSeconds);
     RenderSystem(m_World, *m_Renderer);
     m_Renderer->Render();
     m_World.FlushDeferred();
@@ -108,8 +121,14 @@ void Engine::CreateSampleScene() {
     // カメラを向ける範囲。モデルが読めなかったときは立方体の並び全体（11 個 × 1.5 間隔 ≒ 16.5）
     Bounds focus = Bounds::FromCenterSize(Vector3::zero, Vector3{ 16.5f, 2.0f, 16.5f });
 
-    // 読み込んだモデルを立方体の上に 1 つ置く。読めなくても立方体は描けるので、ログだけ出して続ける
-    if (const auto model = ImportModel(kSampleModelPath, kSampleModelScale)) {
+    // 読み込んだモデルを立方体の上に 1 つ置く。見つからない・読めないときも立方体は描けるので、ログだけ出して続ける。
+    // assets もシェーダーと同じく、exe の場所からさかのぼって探す
+    const std::filesystem::path assetDirectory = FindDirectoryUpward("assets", kSampleModelFile);
+    std::optional<ModelCpuData> model;
+    if (!assetDirectory.empty()) {
+        model = ImportModel(assetDirectory / kSampleModelFile, kSampleModelScale);
+    }
+    if (model) {
         const Vector3 modelPosition{ 0.0f, 3.0f, 0.0f };
         const MeshHandle modelMesh = CreateMeshFromModel(*m_Renderer, *model);
         m_World.CreateEntity(
@@ -122,7 +141,7 @@ void Engine::CreateSampleScene() {
         focus = ComputeBounds(*model);
         focus.center += modelPosition;
     } else {
-        LogError("[Engine] サンプルモデルの読み込みに失敗しました");
+        LogError(std::string("[Engine] サンプルモデルを読み込めませんでした: assets/") + kSampleModelFile);
     }
 
     // カメラ: 正面（-Z 側）の少し上から見下ろし、focus 全体が画面に入る距離に置く。

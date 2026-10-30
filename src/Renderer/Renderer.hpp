@@ -12,6 +12,7 @@
 #include "RHI/RHITypes.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <vector>
@@ -53,16 +54,26 @@ struct MaterialDesc {
 //
 // 1 フレームの流れ:
 //   SetCamera → Draw を描きたい数だけ（ここでは積むだけ）→ Render（まとめて GPU へ送って Present）
+class ShaderWatcher;
+
 class Renderer {
 public:
-    Renderer(ERHIBackend backend, void* windowHandle, std::uint32_t width, std::uint32_t height);
+    // shaderDirectory: Mesh.hlsl などがあるフォルダ。探すのは呼び出し側（Renderer は Win32 に依存しないため）
+    Renderer(ERHIBackend backend, void* windowHandle, std::uint32_t width, std::uint32_t height,
+             std::filesystem::path shaderDirectory);
     ~Renderer();
+
+    // shaders フォルダを探すときの目印にするファイル
+    static constexpr const char* kMeshShaderFile = "Mesh.hlsl";
 
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
     // バックバッファと深度バッファを作り直す。0 サイズ（最小化）は呼ばないこと
     void Resize(std::uint32_t width, std::uint32_t height);
+
+    // シェーダーのファイルが保存されていたら作り直す。毎フレーム呼んでよい（確認は 0.5 秒おき）
+    void PollShaderReload(float deltaSeconds);
 
     // ---- メッシュ ---- //
     // 頂点とインデックス（時計回りが表）を GPU に置き、番号を返す。
@@ -112,7 +123,9 @@ private:
     };
 
     void CreateDepthBuffer(std::uint32_t width, std::uint32_t height);
-    void CreatePipeline();
+    void CreatePipelineLayout();
+    // VS / PS をファイルからコンパイルして PSO を作る。失敗したら nullptr（ログは出す）
+    RHIPipelineStateRef BuildPipelineState();
     void CreateConstantBuffer();
     void CreateDefaultMaterial();
     void EnsureInstanceCapacity(std::size_t instanceCount);
@@ -143,6 +156,9 @@ private:
     // デスクリプタテーブルを作るときにレイアウトが要るので、PSO とは別に持っておく
     RHIPipelineLayoutRef m_PipelineLayout;
     RHIPipelineStateRef m_Pipeline;
+    std::filesystem::path m_ShaderDirectory;
+    // 前方宣言のまま unique_ptr で持てるのは、破棄する ~Renderer が .cpp（中身が見える所）にあるため
+    std::unique_ptr<ShaderWatcher> m_ShaderWatcher;
 
     // フレームごとの定数（カメラ・ライト）。Upload メモリなので、作ったときに一度 Map したまま書き続ける
     RHIBufferRef m_ConstantBuffer;

@@ -13,14 +13,62 @@
 #endif
 
 #include <cstring>
+#include <fstream>
 #include <iterator>
 
 namespace ShaderCompiler {
 
 namespace {
 
+// ファイルを丸ごと読む。先頭の BOM（EF BB BF）は外す。
+// D3DCompile は BOM を文字として読んでしまい、「X3000: Illegal character」で失敗するため
+bool ReadSourceFile(const std::filesystem::path& path, std::string& out) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (out.size() >= 3
+        && static_cast<unsigned char>(out[0]) == 0xEF
+        && static_cast<unsigned char>(out[1]) == 0xBB
+        && static_cast<unsigned char>(out[2]) == 0xBF) {
+        out.erase(0, 3);
+    }
+    return true;
+}
+
+// D3DCompile 用の #include の処理役。directory から探して読む。
+// 標準の D3D_COMPILE_STANDARD_FILE_INCLUDE は BOM を外さないうえ、
+// メモリから渡したソースだと探す場所が作業ディレクトリになることがあるので、自前で用意する
+class DirectoryInclude final : public ID3DInclude {
+public:
+    explicit DirectoryInclude(std::filesystem::path directory) : m_Directory(std::move(directory)) {}
+
+    HRESULT __stdcall Open(D3D_INCLUDE_TYPE, LPCSTR fileName, LPCVOID, LPCVOID* data, UINT* bytes) override {
+        std::string text;
+        if (!ReadSourceFile(m_Directory / fileName, text)) {
+            return E_FAIL;
+        }
+        // コンパイラが Close を呼ぶまで生きていればよい。new で確保して Close で消す
+        char* copy = new char[text.size()];
+        std::memcpy(copy, text.data(), text.size());
+        *data = copy;
+        *bytes = static_cast<UINT>(text.size());
+        return S_OK;
+    }
+
+    HRESULT __stdcall Close(LPCVOID data) override {
+        delete[] static_cast<const char*>(data);
+        return S_OK;
+    }
+
+private:
+    std::filesystem::path m_Directory;
+};
+
 // D3D11 / D3D12 用。シェーダーモデル 5.0 の DXBC を作る
-std::vector<std::uint8_t> CompileDxbc(const std::string& source, const char* debugName, const char* entryPoint, Stage stage) {
+std::vector<std::uint8_t> CompileDxbc(const std::string& source, const char* debugName, const char* entryPoint,
+                                      Stage stage, ID3DInclude* include) {
     const char* target = stage == Stage::Vertex ? "vs_5_0" : "ps_5_0";
 
     // Debug ビルドでは最適化を切ってデバッグ情報を残す。PIX などでシェーダーを追えるようにするため
@@ -33,7 +81,7 @@ std::vector<std::uint8_t> CompileDxbc(const std::string& source, const char* deb
     ComPtr<ID3DBlob> code;
     ComPtr<ID3DBlob> error;
     const HRESULT hr = D3DCompile(
-        source.data(), source.size(), debugName, nullptr, nullptr,
+        source.data(), source.size(), debugName, nullptr, include,
         entryPoint, target, flags, 0, &code, &error);
     if (FAILED(hr)) {
         LogError(std::string("[Shader] コンパイルに失敗: ") + debugName + "\n"
@@ -47,8 +95,10 @@ std::vector<std::uint8_t> CompileDxbc(const std::string& source, const char* deb
 }
 
 #if TE_RHI_VULKAN
-// Vulkan 用。dxc で SPIR-V を作る（D3DCompile は SPIR-V を出せない）
-std::vector<std::uint8_t> CompileSpirv(const std::string& source, const char* debugName, const char* entryPoint, Stage stage) {
+// Vulkan 用。dxc で SPIR-V を作る（D3DCompile は SPIR-V を出せない）。
+// sourcePath が空でなければ、エラーに出る名前と #include を探すフォルダとして使う
+std::vector<std::uint8_t> CompileSpirv(const std::string& source, const char* debugName, const char* entryPoint,
+                                       Stage stage, const std::filesystem::path& sourcePath) {
     ComPtr<IDxcUtils> utils;
     ComPtr<IDxcCompiler3> compiler;
     if (FAILED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&utils)))
@@ -64,7 +114,7 @@ std::vector<std::uint8_t> CompileSpirv(const std::string& source, const char* de
 
     // dxc の引数はワイド文字列なので、エントリポイント名を変換しておく
     const std::wstring entry(entryPoint, entryPoint + std::strlen(entryPoint));
-    LPCWSTR arguments[] = {
+    std::vector<LPCWSTR> arguments = {
         L"-E", entry.c_str(),
         L"-T", stage == Stage::Vertex ? L"vs_6_0" : L"ps_6_0",
         L"-spirv",
@@ -76,9 +126,20 @@ std::vector<std::uint8_t> CompileSpirv(const std::string& source, const char* de
 #endif
     };
 
+    // 文字列は arguments が指している間（Compile が終わるまで）生きている必要があるので、外で持つ
+    const std::wstring sourceName = sourcePath.wstring();
+    const std::wstring includeDirectory = sourcePath.parent_path().wstring();
+    ComPtr<IDxcIncludeHandler> includeHandler;
+    if (!sourcePath.empty()) {
+        arguments.push_back(sourceName.c_str());  // 「-」で始まらない引数は、ソースのファイル名として扱われる
+        arguments.push_back(L"-I");
+        arguments.push_back(includeDirectory.c_str());
+        utils->CreateDefaultIncludeHandler(&includeHandler);
+    }
+
     ComPtr<IDxcResult> result;
-    if (FAILED(compiler->Compile(&sourceBuffer, arguments, static_cast<UINT32>(std::size(arguments)), nullptr,
-                                 IID_PPV_ARGS(&result)))) {
+    if (FAILED(compiler->Compile(&sourceBuffer, arguments.data(), static_cast<UINT32>(arguments.size()),
+                                 includeHandler.Get(), IID_PPV_ARGS(&result)))) {
         LogError(std::string("[Shader] dxc の呼び出しに失敗: ") + debugName);
         return {};
     }
@@ -104,6 +165,24 @@ std::vector<std::uint8_t> CompileSpirv(const std::string& source, const char* de
 }
 #endif
 
+// backend に合わせて振り分ける。sourcePath が空ならメモリ上のソース（#include は使えない）
+std::vector<std::uint8_t> CompileFor(const std::string& source, const char* debugName, const char* entryPoint,
+                                     Stage stage, ERHIBackend backend, const std::filesystem::path& sourcePath) {
+    if (backend == ERHIBackend::Vulkan) {
+#if TE_RHI_VULKAN
+        return CompileSpirv(source, debugName, entryPoint, stage, sourcePath);
+#else
+        LogError("[Shader] Vulkan なしでビルドしているので SPIR-V は作れない");
+        return {};
+#endif
+    }
+    if (sourcePath.empty()) {
+        return CompileDxbc(source, debugName, entryPoint, stage, nullptr);
+    }
+    DirectoryInclude include(sourcePath.parent_path());
+    return CompileDxbc(source, debugName, entryPoint, stage, &include);
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> Compile(
@@ -112,15 +191,22 @@ std::vector<std::uint8_t> Compile(
     const char* entryPoint,
     Stage stage,
     ERHIBackend backend) {
-    if (backend == ERHIBackend::Vulkan) {
-#if TE_RHI_VULKAN
-        return CompileSpirv(source, debugName, entryPoint, stage);
-#else
-        LogError("[Shader] Vulkan なしでビルドしているので SPIR-V は作れない");
+    return CompileFor(source, debugName, entryPoint, stage, backend, {});
+}
+
+std::vector<std::uint8_t> CompileFile(
+    const std::filesystem::path& path,
+    const char* entryPoint,
+    Stage stage,
+    ERHIBackend backend) {
+    std::string source;
+    if (!ReadSourceFile(path, source)) {
+        LogError("[Shader] ファイルを開けません: " + path.string());
         return {};
-#endif
     }
-    return CompileDxbc(source, debugName, entryPoint, stage);
+    // エラーの行頭に出る名前。フルパスにしておくと、出力ウィンドウでダブルクリックしてその行へ飛べる
+    const std::string name = path.string();
+    return CompileFor(source, name.c_str(), entryPoint, stage, backend, path);
 }
 
 }  // namespace ShaderCompiler

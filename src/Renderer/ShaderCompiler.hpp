@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <filesystem>
 
 // RHI はコンパイル済みのバイト列しか受け取らない（RHIShaderByteCode）。
 // HLSL → バイト列の変換はここに閉じ込めて、コンパイラ（d3dcompiler / dxc）への依存をこのファイルだけにする。
@@ -30,5 +31,12 @@ std::vector<std::uint8_t> Compile(
     const char* entryPoint,
     Stage stage,
     ERHIBackend backend);
+
+std::vector<std::uint8_t> CompileFile(
+    const std::filesystem::path& path,
+    const char* entryPoint,
+    Stage stage,
+    ERHIBackend backend
+);
 
 }  // namespace ShaderCompiler
