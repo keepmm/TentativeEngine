@@ -14,6 +14,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <span>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -128,21 +129,73 @@ namespace TE {
 
         template <typename T>
         void RemoveComponent(Entity entity) {
-            assert(m_IterationDepth == 0 && "Each の中で RemoveComponent している。RemoveComponentDeferred を使う");
-            if (!HasComponent<T>(entity)) {
-                return;
-            }
-            const ComponentTypeID id = ComponentTypeIDOf<T>();
-            Slot& slot = m_Slots[entity.index];
-            Archetype& source = *m_Archetypes[slot.archetype];
-            NotifyRemove(entity, source, { slot.chunk, slot.row }, source.ColumnOf(id));
-            // 行き先に T の列はないので、MoveEntity の中で T は破棄される
-            MoveEntity(entity, RemoveTarget(slot.archetype, id));
+            RemoveComponent(entity, ComponentTypeIDOf<T>());
         }
 
         template <typename T>
         bool HasComponent(Entity entity) const {
-            return IsAlive(entity) && m_Archetypes[m_Slots[entity.index].archetype]->Has(ComponentTypeIDOf<T>());
+            return HasComponent(entity, ComponentTypeIDOf<T>());
+        }
+
+        // ---- 型番号で触る ---- //
+        // 型を知らない側（エディターの Inspector、シーンの保存やコピー）向け。中身の意味付けは呼び出し側がする
+
+        /// @brief その Entity が持つコンポーネントの型番号（小さい順 = アーキタイプの列の並び）。破棄済みなら空
+        /// @note  Add / Remove / Destroy の後は別のアーキタイプを指すので、取り直すこと
+        std::span<const ComponentTypeID> GetComponentTypes(Entity entity) const {
+            if (!IsAlive(entity)) {
+                return {};
+            }
+            return m_Archetypes[m_Slots[entity.index].archetype]->Types();
+        }
+
+        bool HasComponent(Entity entity, ComponentTypeID id) const {
+            return IsAlive(entity) && m_Archetypes[m_Slots[entity.index].archetype]->Has(id);
+        }
+
+        // 持っていなければ nullptr
+        void* TryGetComponent(Entity entity, ComponentTypeID id) {
+            if (!IsAlive(entity)) {
+                return nullptr;
+            }
+            const Slot& slot = m_Slots[entity.index];
+            Archetype& archetype = *m_Archetypes[slot.archetype];
+            const int column = archetype.ColumnOf(id);
+            if (column < 0) {
+                return nullptr;
+            }
+            return archetype.ComponentAt(archetype.Chunks()[slot.chunk], column, slot.row);
+        }
+
+        /// @brief 既定値で作って追加し、その場所を返す（ComponentInfo::defaultConstruct を使う）
+        /// @note  テンプレート版の AddComponent と同じく引っ越しが起きる
+        void* AddComponent(Entity entity, ComponentTypeID id) {
+            assert(m_IterationDepth == 0 && "Each の中で AddComponent している。Defer を使う");
+            assert(IsAlive(entity) && "破棄済みの Entity にコンポーネントを追加している");
+            assert(!HasComponent(entity, id) && "同じコンポーネントを 2 回追加している");
+            const ComponentInfo& info = GetComponentInfo(id);
+            assert(info.defaultConstruct != nullptr && "既定値で作れない型（例外を出さない既定コンストラクタがない）");
+
+            Slot& slot = m_Slots[entity.index];
+            const std::uint32_t target = AddTarget(slot.archetype, id);
+            MoveEntity(entity, target);
+
+            Archetype& archetype = *m_Archetypes[target];
+            void* component = archetype.ComponentAt(archetype.Chunks()[slot.chunk], archetype.ColumnOf(id), slot.row);
+            info.defaultConstruct(component);
+            return component;
+        }
+
+        void RemoveComponent(Entity entity, ComponentTypeID id) {
+            assert(m_IterationDepth == 0 && "Each の中で RemoveComponent している。RemoveComponentDeferred を使う");
+            if (!HasComponent(entity, id)) {
+                return;
+            }
+            Slot& slot = m_Slots[entity.index];
+            Archetype& source = *m_Archetypes[slot.archetype];
+            NotifyRemove(entity, source, { slot.chunk, slot.row }, source.ColumnOf(id));
+            // 行き先にこの型の列はないので、MoveEntity の中で破棄される
+            MoveEntity(entity, RemoveTarget(slot.archetype, id));
         }
 
         template <typename T>
@@ -262,6 +315,21 @@ namespace TE {
                     }
                     else {
                         func(chunk.count, Archetype::Entities(chunk), static_cast<const std::uint64_t*>(nullptr), archetype->Column<Ts>(chunk)...);
+                    }
+                }
+            }
+        }
+
+        /// @brief 生きている Entity をすべて回す（コンポーネントの組み合わせを問わない）。func(Entity)
+        /// @note  アーキタイプ → チャンクの順なので、作った順にはならない。Each と同じく中で構造は変えられない
+        template <typename Func>
+        void EachEntity(Func&& func) {
+            IterationGuard guard(m_IterationDepth);
+            for (const auto& archetype : m_Archetypes) {
+                for (Chunk& chunk : archetype->Chunks()) {
+                    const Entity* entities = Archetype::Entities(chunk);
+                    for (std::uint32_t row = 0; row < chunk.count; ++row) {
+                        func(entities[row]);
                     }
                 }
             }

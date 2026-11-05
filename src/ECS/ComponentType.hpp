@@ -25,6 +25,8 @@ namespace TE
 		bool enableable = false;
 		void (*moveConstruct)(void* destination, void* source) = nullptr;
 		void (*destroy)(void* object) = nullptr;
+		void (*defaultConstruct)(void* destination) = nullptr;
+		void (*copyConstruct)(void* destionation, const void* source) = nullptr;
 	};
 
 	template<typename T>
@@ -62,6 +64,21 @@ namespace TE
 					{
 						static_cast<T*>(object)->~T();
 					};
+				// 既定値で作るのは引っ越しの後（チャンクの中）なので、例外を出さない型だけ許す
+				if constexpr (std::is_nothrow_default_constructible_v<T>)
+				{
+					info.defaultConstruct = [](void* destination)
+						{
+							::new(destination) T();
+						};
+				}
+				if constexpr (std::is_copy_constructible_v<T>)
+				{
+					info.copyConstruct = [](void* destination, const void* source)
+						{
+							::new(destination) T(*static_cast<const T*>(source));
+						};
+				}
 
 				auto& infos = ComponentInfos();
 				infos.push_back(info);
