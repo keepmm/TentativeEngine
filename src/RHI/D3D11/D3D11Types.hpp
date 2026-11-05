@@ -181,3 +181,41 @@ inline D3D11_TEXTURE_ADDRESS_MODE ToD3D11AddressMode(ERHIAddressMode mode) noexc
 	default:                      return D3D11_TEXTURE_ADDRESS_WRAP;
 	}
 }
+
+// ---- ブレンド ---- //
+
+inline D3D11_BLEND ToD3D11Blend(ERHIBlendFactor b) noexcept
+{
+	switch (b)
+	{
+	case ERHIBlendFactor::Zero:        return D3D11_BLEND_ZERO;
+	case ERHIBlendFactor::One:         return D3D11_BLEND_ONE;
+	case ERHIBlendFactor::SrcColor:    return D3D11_BLEND_SRC_COLOR;
+	case ERHIBlendFactor::InvSrcColor: return D3D11_BLEND_INV_SRC_COLOR;
+	case ERHIBlendFactor::SrcAlpha:    return D3D11_BLEND_SRC_ALPHA;
+	case ERHIBlendFactor::InvSrcAlpha: return D3D11_BLEND_INV_SRC_ALPHA;
+	case ERHIBlendFactor::DstColor:    return D3D11_BLEND_DEST_COLOR;
+	case ERHIBlendFactor::InvDstColor: return D3D11_BLEND_INV_DEST_COLOR;
+	case ERHIBlendFactor::DstAlpha:    return D3D11_BLEND_DEST_ALPHA;
+	case ERHIBlendFactor::InvDstAlpha: return D3D11_BLEND_INV_DEST_ALPHA;
+	default:                           return D3D11_BLEND_ONE;
+	}
+}
+
+inline D3D11_BLEND_OP ToD3D11BlendOp(ERHIBlendOp op) noexcept
+{
+	switch (op)
+	{
+	case ERHIBlendOp::Subtract:    return D3D11_BLEND_OP_SUBTRACT;
+	case ERHIBlendOp::RevSubtract: return D3D11_BLEND_OP_REV_SUBTRACT;
+	case ERHIBlendOp::Min:         return D3D11_BLEND_OP_MIN;
+	case ERHIBlendOp::Max:         return D3D11_BLEND_OP_MAX;
+	default:                       return D3D11_BLEND_OP_ADD;
+	}
+}
+
+/// @brief R=1 G=2 B=4 A=8 は D3D11_COLOR_WRITE_ENABLE と同じ並びなのでそのまま渡せる
+inline UINT8 ToD3D11WriteMask(ERHIColorWriteMask m) noexcept
+{
+	return static_cast<UINT8>(m);
+}

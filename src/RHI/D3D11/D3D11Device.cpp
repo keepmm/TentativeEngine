@@ -287,9 +287,22 @@ RHIPipelineStateRef D3D11Device::CreatePipelineState(const RHIGraphicsPipelineDe
 	}
 
 	// ブレンド
+	// レンダーターゲットごとに desc.blend をそのまま写す（D3D12 バックエンドと同じ扱い）
 	D3D11_BLEND_DESC bd{};
-	bd.RenderTarget[0].BlendEnable = FALSE;
-	bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+	bd.IndependentBlendEnable = desc.numRenderTargets > 1 ? TRUE : FALSE;
+	for (uint32_t i = 0; i < desc.numRenderTargets && i < RHI_MAX_RENDER_TARGETS; ++i)
+	{
+		const RHIBlendDesc& src = desc.blend[i];
+		D3D11_RENDER_TARGET_BLEND_DESC& dst = bd.RenderTarget[i];
+		dst.BlendEnable = src.blendEnable ? TRUE : FALSE;
+		dst.SrcBlend = ToD3D11Blend(src.srcColor);
+		dst.DestBlend = ToD3D11Blend(src.dstColor);
+		dst.BlendOp = ToD3D11BlendOp(src.colorOp);
+		dst.SrcBlendAlpha = ToD3D11Blend(src.srcAlpha);
+		dst.DestBlendAlpha = ToD3D11Blend(src.dstAlpha);
+		dst.BlendOpAlpha = ToD3D11BlendOp(src.alphaOp);
+		dst.RenderTargetWriteMask = ToD3D11WriteMask(src.writeMask);
+	}
 
 	ComPtr<ID3D11BlendState> bs;
 	if (FAILED(m_Device->CreateBlendState(&bd, bs.GetAddressOf())))
