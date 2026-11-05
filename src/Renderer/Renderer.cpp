@@ -32,7 +32,9 @@ namespace {
     // 大きさが 16 の倍数かを確かめておく（Vector3 を足すときは float 1 個ぶんの隙間を入れる）
     struct FrameConstants {
         Matrix4x4 viewProjection;
-        Vector4 lightDirection;  // xyz: 光が進む向き（ワールド空間）
+        Vector4 lightDirection;          // xyz: 光が進む向き（ワールド空間）
+        Matrix4x4 inverseViewProjection; // 画面上の点をワールドに戻す（グリッドが使う）
+        Vector4 cameraPosition;          // xyz: カメラのワールド位置
     };
     static_assert(sizeof(FrameConstants) % 16 == 0, "cbuffer の大きさは 16 バイトの倍数にする");
     static_assert(std::is_trivially_copyable_v<FrameConstants>, "GPU へは memcpy で送るので、ただのデータにする");
@@ -55,6 +57,8 @@ namespace {
     constexpr std::uint64_t kConstantBufferSize = 256;
 
     constexpr ERHIFormat kDepthFormat = ERHIFormat::D32_FLOAT;
+    // 3D を描く RT（Scene / Game 共通）。バックバッファと同じく _SRGB にしない（シェーダーの出力をそのまま表示用の値として持つ）
+    constexpr ERHIFormat kSceneColorFormat = ERHIFormat::R8G8B8A8_UNORM;
     constexpr std::size_t kInitialInstanceCapacity = 1024;
 
 }  // namespace
@@ -94,7 +98,23 @@ Renderer::Renderer(ERHIBackend backend, void* windowHandle, std::uint32_t width,
         throw std::runtime_error("コマンドリスト / フェンスの生成に失敗しました");
     }
 
-    CreateDepthBuffer(width, height);
+    // ビューごとの名前と性質。Scene だけグリッドを描く
+    ViewTarget& scene = GetView(ViewId::Scene);
+    scene.colorName = "SceneColor";
+    scene.depthName = "SceneDepth";
+    scene.constantsName = "SceneFrameConstants";
+    scene.gridAllowed = true;
+    scene.enabled = true;
+
+    ViewTarget& game = GetView(ViewId::Game);
+    game.colorName = "GameColor";
+    game.depthName = "GameDepth";
+    game.constantsName = "GameFrameConstants";
+    game.gridAllowed = false;
+    game.enabled = false;  // Game パネルが出るまでは描かない。RT もそのとき作る
+
+    // Scene View の大きさは、パネルの大きさが分かるまでウィンドウと同じにしておく
+    CreateViewTargets(scene, width, height);
     // レイアウトは作り直さない（マテリアルのデスクリプタテーブルがこれに結び付いているため）。
     // PSO はシェーダーを保存するたびに作り直す
     CreatePipelineLayout();
@@ -103,16 +123,21 @@ Renderer::Renderer(ERHIBackend backend, void* windowHandle, std::uint32_t width,
         // 起動時は差し替える前の PSO が無いので、描けない。中身は出力ウィンドウのエラーを見る
         throw std::runtime_error("メッシュのパイプラインの生成に失敗しました");
     }
+    // グリッドは無くても描けるので、失敗しても止めない
+    m_GridPipeline = BuildGridPipelineState();
     m_ShaderWatcher = std::make_unique<ShaderWatcher>(m_ShaderDirectory);
-    CreateConstantBuffer();
+    CreateConstantBuffer(scene);
+    CreateConstantBuffer(game);
     EnsureInstanceCapacity(kInitialInstanceCapacity);
     // 立方体は既定のマテリアルを使うので、こちらを先に作る
     CreateDefaultMaterial();
     m_CubeMesh = CreateCubeMesh();
 
     // カメラが 1 台もないときでも何か写るよう、原点を少し離れて見ておく
-    SetCamera(Matrix4x4::LookAtLH({ 0.0f, 1.0f, -3.0f }, Vector3::zero, Vector3::up),
-        Matrix4x4::PerspectiveFovLH(60.0f, AspectRatio(), 0.1f, 1000.0f));
+    SetViewCamera(ViewId::Scene,
+        Matrix4x4::LookAtLH({ 0.0f, 1.0f, -3.0f }, Vector3::zero, Vector3::up),
+        Matrix4x4::PerspectiveFovLH(60.0f, ViewAspect(ViewId::Scene), 0.1f, 1000.0f),
+        Color{ 0.10f, 0.12f, 0.18f, 1.0f });
 }
 
 Renderer::~Renderer() {
@@ -123,29 +148,56 @@ Renderer::~Renderer() {
 }
 
 void Renderer::Resize(std::uint32_t width, std::uint32_t height) {
-    // Resize の中で GPU の完了を待つので、ここで待つ必要はない
+    // Resize の中で GPU の完了を待つので、ここで待つ必要はない。
+    // 深度はビューの大きさに合わせるので、ここでは作り直さない
     if (!m_SwapChain->Resize(width, height)) {
         LogError("[Renderer] スワップチェインのリサイズに失敗");
+    }
+}
+
+void Renderer::ResizeView(ViewId id, std::uint32_t width, std::uint32_t height) {
+    ViewTarget& view = GetView(id);
+    if (width == 0 || height == 0 || (view.color && width == view.width && height == view.height)) {
         return;
     }
-    // 深度バッファもバックバッファと同じ大きさでないと使えない
-    CreateDepthBuffer(width, height);
+    // 前のフレームの GPU の作業は Render の最後の Wait で終わっている。古い RT は RHI の遅延解放で残る
+    CreateViewTargets(view, width, height);
+}
+
+void Renderer::SetViewCamera(ViewId id, const Matrix4x4& view, const Matrix4x4& projection, const Color& clearColor) {
+    ViewTarget& target = GetView(id);
+    target.view = view;
+    target.projection = projection;
+    target.clearColor = clearColor;
+}
+
+float Renderer::ViewAspect(ViewId id) const {
+    const ViewTarget& view = GetView(id);
+    if (view.width == 0 || view.height == 0) {
+        return 1.0f;
+    }
+    return static_cast<float>(view.width) / static_cast<float>(view.height);
 }
 
 void Renderer::PollShaderReload(float deltaSeconds) {
     if (!m_ShaderWatcher->Poll(deltaSeconds)) {
         return;
     }
-    // 失敗したら古い PSO のまま描き続ける。直して保存すれば、もう一度ここに来る
+    // ShaderWatcher はどのファイルが変わったかを区別しないので、全部作り直す。
+    // 失敗したものだけ古い PSO のまま描き続ける。直して保存すれば、もう一度ここに来る
+    // 古い PSO は手放すだけでよい。GPU が使い終わるまでは RHI の遅延解放で残る
+    bool reloaded = false;
     if (RHIPipelineStateRef pipeline = BuildPipelineState()) {
-        // 古い PSO は手放すだけでよい。GPU が使い終わるまでは RHI の遅延解放で残る
         m_Pipeline = std::move(pipeline);
+        reloaded = true;
+    }
+    if (RHIPipelineStateRef grid = BuildGridPipelineState()) {
+        m_GridPipeline = std::move(grid);
+        reloaded = true;
+    }
+    if (reloaded) {
         LogInfo("[Renderer] シェーダーを読み直しました");
     }
-}
-
-float Renderer::AspectRatio() const {
-    return static_cast<float>(m_SwapChain->GetWidth()) / static_cast<float>(m_SwapChain->GetHeight());
 }
 
 // ---------------------------------------------------//
@@ -189,6 +241,14 @@ MeshHandle Renderer::CreateMesh(std::span<const MeshVertex> vertices,
     }
 
     const MeshHandle handle{ static_cast<std::uint32_t>(m_Meshes.size()) };
+    // 頂点をすべて囲む箱。GPU に送った後は頂点を読み返せないので、ここで求めておく
+    if (!vertices.empty()) {
+        mesh.bounds = Bounds{ vertices[0].position, Vector3{} };
+        for (const MeshVertex& vertex : vertices) {
+            mesh.bounds.Encapsulate(vertex.position);
+        }
+    }
+
     m_Meshes.push_back(std::move(mesh));
     m_PendingInstances.emplace_back();
     return handle;
@@ -358,11 +418,6 @@ void Renderer::CreateDefaultMaterial() {
 //                  1 フレームの描画                    //
 // ---------------------------------------------------//
 
-void Renderer::SetCamera(const Matrix4x4& view, const Matrix4x4& projection) {
-    m_View = view;
-    m_Projection = projection;
-}
-
 void Renderer::Draw(MeshHandle mesh, const Matrix4x4& world, const Color& color) {
     if (!mesh.IsValid() || mesh.index >= m_Meshes.size()) {
         return;  // まだメッシュを割り当てていない MeshRenderer は描かない
@@ -380,15 +435,10 @@ void Renderer::Render() {
     const std::uint32_t height = m_SwapChain->GetHeight();
 
     // ---- GPU に送るデータを書く ---- //
-    // 前フレームの GPU の作業は Wait で終わっているので、ここで書き換えても描画中のデータは壊れない
-    FrameConstants constants{};
-    // 行ベクトルなので「ビュー → 投影」の順に左から掛ける
-    constants.viewProjection = (m_View * m_Projection).Transposed();
-    constants.lightDirection = Vector4::Direction(Vector3{ 0.4f, -1.0f, 0.6f }.Normalized());
-    std::memcpy(m_MappedConstants, &constants, sizeof(constants));
-
+    // 前フレームの GPU の作業は Wait で終わっているので、ここで書き換えても描画中のデータは壊れない。
     // 全メッシュのインスタンスを 1 本のバッファに詰める。メッシュごとに「何番目から何個」を覚えておく。
-    // マテリアルの色はシェーダーで掛けるので、同じメッシュのサブメッシュは同じインスタンスを読み回せる
+    // マテリアルの色はシェーダーで掛けるので、同じメッシュのサブメッシュは同じインスタンスを読み回せる。
+    // 詰めるのは 1 回だけで、有効な全ビューが同じ範囲を読む（フレーム定数はビューごとに RecordViewPass で書く）
     std::size_t totalInstances = 0;
     for (const auto& instances : m_PendingInstances) {
         totalInstances += instances.size();
@@ -404,54 +454,31 @@ void Renderer::Render() {
 
     // ---- 記録 ---- //
     m_CommandList->Begin();
-    // 前フレームの内容は使わないので Undefined から遷移させる
-    m_CommandList->Transition(backBuffer, ERHIResourceState::Undefined, ERHIResourceState::RenderTarget);
-    if (m_DepthNeedsTransition) {
-        // 作り直した直後だけ。以降は DepthWrite のまま使い続ける
-        m_CommandList->Transition(m_DepthBuffer.get(), ERHIResourceState::Undefined, ERHIResourceState::DepthWrite);
-        m_DepthNeedsTransition = false;
+
+    // ---- パス 1: 3D → 各ビューの RT ---- //
+    // 有効なビューだけ描く。1 本のコマンドリストに続けて記録し、Submit は 1 回
+    for (ViewTarget& view : m_Views) {
+        if (view.enabled && view.color) {
+            RecordViewPass(view);
+        }
     }
 
-    RHIRenderPassDesc pass{};
-    pass.numColors = 1;
-    pass.colors[0].texture = backBuffer;
-    pass.colors[0].loadOp = ERHILoadOp::Clear;
-    pass.colors[0].storeOp = ERHIStoreOp::Store;
-    pass.colors[0].clearColor[0] = m_ClearColor.r;
-    pass.colors[0].clearColor[1] = m_ClearColor.g;
-    pass.colors[0].clearColor[2] = m_ClearColor.b;
-    pass.colors[0].clearColor[3] = m_ClearColor.a;
-    // 深度は毎フレーム一番奥（1.0）で塗りつぶし、次のフレームには持ち越さない
-    pass.depth.texture = m_DepthBuffer.get();
-    pass.depth.loadOp = ERHILoadOp::Clear;
-    pass.depth.storeOp = ERHIStoreOp::DontCare;
-    pass.depth.clearDepth = 1.0f;
-    m_CommandList->BeginRenderPass(pass);
+    // ---- パス 2: UI → バックバッファ ---- //
+    // 前フレームの内容は使わないので Undefined から遷移させる
+    m_CommandList->Transition(backBuffer, ERHIResourceState::Undefined, ERHIResourceState::RenderTarget);
+
+    RHIRenderPassDesc uiPass{};
+    uiPass.numColors = 1;
+    uiPass.colors[0].texture = backBuffer;
+    uiPass.colors[0].loadOp = ERHILoadOp::Clear;
+    uiPass.colors[0].storeOp = ERHIStoreOp::Store;
+    m_CommandList->BeginRenderPass(uiPass);
 
     m_CommandList->SetViewport({ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f });
     m_CommandList->SetScissor({ 0, 0, static_cast<std::int32_t>(width), static_cast<std::int32_t>(height) });
-    m_CommandList->SetPipelineState(m_Pipeline.get());
-    m_CommandList->SetConstantBuffer(kFrameConstantsSlot, m_ConstantBuffer.get());
-
-    // サブメッシュごとに 1 回描く。同じメッシュの物体は何個あっても、サブメッシュ 1 つにつき DrawIndexed 1 回で済む
-    std::size_t first = 0;
-    for (std::size_t i = 0; i < m_Meshes.size(); ++i) {
-        const std::uint32_t count = static_cast<std::uint32_t>(m_PendingInstances[i].size());
-        if (count == 0) {
-            continue;
-        }
-        const Mesh& mesh = m_Meshes[i];
-        m_CommandList->SetVertexBuffer(0, mesh.vertexBuffer.get());
-        m_CommandList->SetVertexBuffer(1, m_InstanceBuffer.get(), first * sizeof(InstanceData));
-        m_CommandList->SetIndexBuffer(mesh.indexBuffer.get(), ERHIFormat::R32_UINT);
-        for (const SubMeshDesc& subMesh : mesh.subMeshes) {
-            // material は CreateMesh で有効なものに揃えてあるので、そのまま引ける
-            const Material& material = m_Materials[subMesh.material.index];
-            m_CommandList->SetDescriptorTable(kMaterialTexturesSlot, material.textures.get());
-            m_CommandList->SetConstantBuffer(kMaterialConstantsSlot, material.constants.get());
-            m_CommandList->DrawIndexed(subMesh.indexCount, count, subMesh.firstIndex);
-        }
-        first += count;
+    // 深度なしのパスなので depthFormat は Unknown（呼ばれた側はこれで PSO を選ぶ）
+    if (m_OnOverlay) {
+        m_OnOverlay({ *m_CommandList, m_FrameSlot, m_SwapChain->GetFormat(), ERHIFormat::Unknown });
     }
 
     m_CommandList->EndRenderPass();
@@ -476,24 +503,124 @@ void Renderer::Render() {
     }
 }
 
+void Renderer::RecordViewPass(ViewTarget& view) {
+    // フレーム定数をこのビューの b0 に書く。
+    // 前フレームの GPU の作業は Render の最後の Wait で終わっているので、ここで書き換えても描画中のデータは壊れない。
+    // ビューごとに別のバッファなので、2 つ目のビューを書いても 1 つ目のパスが読む値は変わらない
+    FrameConstants constants{};
+    // 行ベクトルなので「ビュー → 投影」の順に左から掛ける
+    const Matrix4x4 viewProjection = view.view * view.projection;
+    constants.viewProjection = viewProjection.Transposed();
+    constants.lightDirection = Vector4::Direction(Vector3{ 0.4f, -1.0f, 0.6f }.Normalized());
+    constants.inverseViewProjection = viewProjection.Inverse().Transposed();
+    // ビュー行列は「ワールド → カメラ」なので、逆行列は「カメラ → ワールド」。
+    // 行ベクトルの行列では平行移動が 4 行目に入るので、そこがカメラのワールド位置になる
+    const Matrix4x4 cameraToWorld = view.view.Inverse();
+    constants.cameraPosition = Vector4{ cameraToWorld.m[3][0], cameraToWorld.m[3][1], cameraToWorld.m[3][2], 1.0f };
+    std::memcpy(view.mappedConstants, &constants, sizeof(constants));
+
+    if (view.needsTransition) {
+        // 作り直した直後だけ。深度は以降 DepthWrite のまま使い続ける
+        m_CommandList->Transition(view.color.get(), ERHIResourceState::Undefined, ERHIResourceState::RenderTarget);
+        m_CommandList->Transition(view.depth.get(), ERHIResourceState::Undefined, ERHIResourceState::DepthWrite);
+        view.needsTransition = false;
+    } else {
+        // 前に描いたフレームの最後に、UI から読める状態にしてあるので戻す
+        m_CommandList->Transition(view.color.get(), ERHIResourceState::ShaderResourcePS, ERHIResourceState::RenderTarget);
+    }
+
+    RHIRenderPassDesc pass{};
+    pass.numColors = 1;
+    pass.colors[0].texture = view.color.get();
+    pass.colors[0].loadOp = ERHILoadOp::Clear;
+    pass.colors[0].storeOp = ERHIStoreOp::Store;  // UI のパスで読むので残す
+    pass.colors[0].clearColor[0] = view.clearColor.r;
+    pass.colors[0].clearColor[1] = view.clearColor.g;
+    pass.colors[0].clearColor[2] = view.clearColor.b;
+    pass.colors[0].clearColor[3] = view.clearColor.a;
+    // 深度は毎フレーム一番奥（1.0）で塗りつぶし、次のフレームには持ち越さない
+    pass.depth.texture = view.depth.get();
+    pass.depth.loadOp = ERHILoadOp::Clear;
+    pass.depth.storeOp = ERHIStoreOp::DontCare;
+    pass.depth.clearDepth = 1.0f;
+    m_CommandList->BeginRenderPass(pass);
+
+    m_CommandList->SetViewport({ 0.0f, 0.0f, static_cast<float>(view.width), static_cast<float>(view.height), 0.0f, 1.0f });
+    m_CommandList->SetScissor({ 0, 0, static_cast<std::int32_t>(view.width), static_cast<std::int32_t>(view.height) });
+    m_CommandList->SetPipelineState(m_Pipeline.get());
+    m_CommandList->SetConstantBuffer(kFrameConstantsSlot, view.constants.get());
+
+    // サブメッシュごとに 1 回描く。同じメッシュの物体は何個あっても、サブメッシュ 1 つにつき DrawIndexed 1 回で済む
+    std::size_t first = 0;
+    for (std::size_t i = 0; i < m_Meshes.size(); ++i) {
+        const std::uint32_t count = static_cast<std::uint32_t>(m_PendingInstances[i].size());
+        if (count == 0) {
+            continue;
+        }
+        const Mesh& mesh = m_Meshes[i];
+        m_CommandList->SetVertexBuffer(0, mesh.vertexBuffer.get());
+        m_CommandList->SetVertexBuffer(1, m_InstanceBuffer.get(), first * sizeof(InstanceData));
+        m_CommandList->SetIndexBuffer(mesh.indexBuffer.get(), ERHIFormat::R32_UINT);
+        for (const SubMeshDesc& subMesh : mesh.subMeshes) {
+            // material は CreateMesh で有効なものに揃えてあるので、そのまま引ける
+            const Material& material = m_Materials[subMesh.material.index];
+            m_CommandList->SetDescriptorTable(kMaterialTexturesSlot, material.textures.get());
+            m_CommandList->SetConstantBuffer(kMaterialConstantsSlot, material.constants.get());
+            m_CommandList->DrawIndexed(subMesh.indexCount, count, subMesh.firstIndex);
+        }
+        first += count;
+    }
+
+    // グリッドは半透明なので、不透明なメッシュを描き終えてから重ねる（先に描くと、後から描いた物体に上書きされる）。
+    // Scene ビューだけ描く（Game ビューにエディターの補助線は出さない）
+    if (view.gridAllowed && m_GridVisible && m_GridPipeline) {
+        m_CommandList->SetPipelineState(m_GridPipeline.get());
+        // PSO を替えたので結び直す（RHI の決まり: バインドは PSO の後で）
+        m_CommandList->SetConstantBuffer(kFrameConstantsSlot, view.constants.get());
+        m_CommandList->Draw(6);  // 頂点バッファなし。VS が SV_VertexID から 2 枚の三角形を作る
+    }
+
+    m_CommandList->EndRenderPass();
+    // UI のパスで ImGui::Image として読む
+    m_CommandList->Transition(view.color.get(), ERHIResourceState::RenderTarget, ERHIResourceState::ShaderResourcePS);
+}
+
 // ---------------------------------------------------//
 //                      作成                           //
 // ---------------------------------------------------//
 
-void Renderer::CreateDepthBuffer(std::uint32_t width, std::uint32_t height) {
-    RHITextureDesc desc{};
-    desc.width = width;
-    desc.height = height;
-    desc.format = kDepthFormat;
-    desc.usage = ERHITextureUsage::DepthStencil;  // シェーダーから読まないので、深度専用にして最適化を許す
-    desc.clearValue.depth = 1.0f;                  // レンダーパスで塗る値と揃えると、クリアが速くなる
-    desc.debugName = "DepthBuffer";
-    // 古い深度バッファは手放すだけでよい。GPU が使い終わるまでは RHI の遅延解放で残る
-    m_DepthBuffer = m_Device->CreateTexture(desc);
-    if (!m_DepthBuffer) {
-        throw std::runtime_error("深度バッファの生成に失敗しました");
+void Renderer::CreateViewTargets(ViewTarget& view, std::uint32_t width, std::uint32_t height) {
+    RHITextureDesc colorDesc{};
+    colorDesc.width = width;
+    colorDesc.height = height;
+    colorDesc.format = kSceneColorFormat;
+    colorDesc.usage = ERHITextureUsage::RenderTarget | ERHITextureUsage::ShaderResource;
+    // レンダーパスで塗る値と揃えると、クリアが速くなる
+    colorDesc.clearValue.color[0] = view.clearColor.r;
+    colorDesc.clearValue.color[1] = view.clearColor.g;
+    colorDesc.clearValue.color[2] = view.clearColor.b;
+    colorDesc.clearValue.color[3] = view.clearColor.a;
+    colorDesc.debugName = view.colorName;
+
+    RHITextureDesc depthDesc{};
+    depthDesc.width = width;
+    depthDesc.height = height;
+    depthDesc.format = kDepthFormat;
+    depthDesc.usage = ERHITextureUsage::DepthStencil;  // シェーダーから読まないので、深度専用にして最適化を許す
+    depthDesc.clearValue.depth = 1.0f;
+    depthDesc.debugName = view.depthName;
+
+    // 古いものは手放すだけでよい。GPU が使い終わるまでは RHI の遅延解放で残る
+    RHITextureRef color = m_Device->CreateTexture(colorDesc);
+    RHITextureRef depth = m_Device->CreateTexture(depthDesc);
+    if (!color || !depth) {
+        throw std::runtime_error("ビューの RT / 深度バッファの生成に失敗しました");
     }
-    m_DepthNeedsTransition = true;
+    view.color = std::move(color);
+    view.depth = std::move(depth);
+    view.width = width;
+    view.height = height;
+    view.needsTransition = true;
 }
 
 void Renderer::CreatePipelineLayout() {
@@ -561,7 +688,7 @@ RHIPipelineStateRef Renderer::BuildPipelineState() {
     psoDesc.depthStencil.depthFunc = ERHICompareFunc::Less;  // 手前のものだけ残す
     psoDesc.dsvFormat = kDepthFormat;
     psoDesc.numRenderTargets = 1;
-    psoDesc.rtvFormat[0] = m_SwapChain->GetFormat();
+    psoDesc.rtvFormat[0] = kSceneColorFormat;  // 3D は各ビューの RT に描く（Scene / Game 共通のフォーマット）
     psoDesc.debugName = "MeshPSO";
 
     RHIPipelineStateRef pipeline = m_Device->CreatePipelineState(psoDesc);
@@ -571,19 +698,54 @@ RHIPipelineStateRef Renderer::BuildPipelineState() {
     return pipeline;
 }
 
-void Renderer::CreateConstantBuffer() {
+RHIPipelineStateRef Renderer::BuildGridPipelineState() {
+    const std::filesystem::path path = m_ShaderDirectory / kGridShaderFile;
+    const ERHIBackend backend = m_Device->GetBackend();
+    const auto vs = ShaderCompiler::CompileFile(path, "VSMain", ShaderCompiler::Stage::Vertex, backend);
+    const auto ps = ShaderCompiler::CompileFile(path, "PSMain", ShaderCompiler::Stage::Pixel, backend);
+    if (vs.empty() || ps.empty()) {
+        return nullptr;  // エラーの中身は ShaderCompiler がログに出している
+    }
+
+    RHIGraphicsPipelineDesc psoDesc{};
+    // メッシュと同じレイアウトを使う。グリッドは b0 しか読まないが、レイアウトを分けるとスロットの番号も別に管理することになる
+    psoDesc.layout = m_PipelineLayout;
+    psoDesc.vs = { vs.data(), vs.size(), "VSMain" };
+    psoDesc.ps = { ps.data(), ps.size(), "PSMain" };
+    // vertexAttributes / vertexBuffers は空のまま（頂点バッファを使わない）
+    // 地面の下から見上げたときも描けるよう、裏面も描く
+    psoDesc.rasterizer.cullMode = ERHICullMode::None;
+    // 物体より奥の格子は隠す（テストはする）。グリッドの後に描くものを邪魔しないよう、深度は書かない
+    psoDesc.depthStencil.depthTestEnable = true;
+    psoDesc.depthStencil.depthWriteEnable = false;
+    psoDesc.depthStencil.depthFunc = ERHICompareFunc::LessEqual;
+    // アルファで背景と混ぜる（線の端をなめらかにし、遠くを薄くするため）
+    psoDesc.blend[0] = RHIBlendDesc::AlphaBlend();
+    psoDesc.dsvFormat = kDepthFormat;
+    psoDesc.numRenderTargets = 1;
+    psoDesc.rtvFormat[0] = kSceneColorFormat;  // 3D は各ビューの RT に描く（Scene / Game 共通のフォーマット）
+    psoDesc.debugName = "GridPSO";
+
+    RHIPipelineStateRef pipeline = m_Device->CreatePipelineState(psoDesc);
+    if (!pipeline) {
+        LogError("[Renderer] グリッドの PSO の生成に失敗しました");
+    }
+    return pipeline;
+}
+
+void Renderer::CreateConstantBuffer(ViewTarget& view) {
     RHIBufferDesc desc{};
     desc.size = kConstantBufferSize;
     desc.usage = ERHIBufferUsage::ConstantBuffer;
     desc.memory = ERHIMemoryType::Upload;
-    desc.debugName = "FrameConstants";
-    m_ConstantBuffer = m_Device->CreateBuffer(desc);
-    if (!m_ConstantBuffer) {
+    desc.debugName = view.constantsName;
+    view.constants = m_Device->CreateBuffer(desc);
+    if (!view.constants) {
         throw std::runtime_error("定数バッファの生成に失敗しました");
     }
     // Upload は作ったときからずっとマップしておける。毎フレームこのポインタに書くだけでよい
-    m_MappedConstants = m_ConstantBuffer->Map();
-    if (m_MappedConstants == nullptr) {
+    view.mappedConstants = view.constants->Map();
+    if (view.mappedConstants == nullptr) {
         throw std::runtime_error("定数バッファのマップに失敗しました");
     }
 }

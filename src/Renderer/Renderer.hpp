@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "Math/Bounds.hpp"
 #include "Math/Color.hpp"
 #include "Math/Matrix4x4.hpp"
 #include "Math/Vector2.hpp"
@@ -11,8 +12,11 @@
 #include "Renderer/MeshRenderer.hpp"
 #include "RHI/RHITypes.hpp"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -49,11 +53,19 @@ struct MaterialDesc {
     TE::Color emissiveFactor = TE::Color::black;   // エミッシブのテクスチャに掛ける
 };
 
+// 3D を描く先（ビュー）。それぞれが自分の RT・カメラ・大きさを持つ。
+// Scene: エディターの Scene パネル（グリッドあり） / Game: Game パネル（機種の解像度で描く。グリッドなし）
+enum class ViewId : std::uint8_t {
+    Scene,
+    Game,
+    Count,
+};
+
 // RHI のインターフェースだけを使う。D3D12 / D3D11 の型はここには出てこない。
 // ウィンドウも void* で受け取り、Platform（Win32）に依存しない。
 //
 // 1 フレームの流れ:
-//   SetCamera → Draw を描きたい数だけ（ここでは積むだけ）→ Render（まとめて GPU へ送って Present）
+//   SetViewCamera（描くビューごと）→ Draw を描きたい数だけ（ここでは積むだけ）→ Render（まとめて GPU へ送って Present）
 class ShaderWatcher;
 
 class Renderer {
@@ -66,10 +78,27 @@ public:
     // shaders フォルダを探すときの目印にするファイル
     static constexpr const char* kMeshShaderFile = "Mesh.hlsl";
 
+    // 地面のグリッド。描く / 描かないを切り替える（既定は描く）。描くのは Scene ビューだけ
+    void SetGridVisible(bool visible) { m_GridVisible = visible; }
+    bool IsGridVisible() const { return m_GridVisible; }
+
+    // UI のパス（バックバッファ、深度なし）の中で呼ばれる。3D は各ビューの RT に描き終えている。Renderer は中身を知らない
+    struct OverlayContext {
+        IRHICommandList& commandList;
+        std::uint32_t frameSlot;   // このスロットを前回使った GPU の作業は終わっている
+        ERHIFormat colorFormat;    // 今のパスのアタッチメント。PSO を合わせるのに使う
+        ERHIFormat depthFormat;
+    };
+    using OverlayCallback = std::function<void(const OverlayContext&)>;
+    void SetOverlayCallback(OverlayCallback callback) { m_OnOverlay = std::move(callback); }
+
+    // RHI で自分のリソースを作るもの（ImGuiRenderer など）に貸す。Renderer より先に破棄すること
+    IRHIDevice& Device() const { return *m_Device; }
+
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    // バックバッファと深度バッファを作り直す。0 サイズ（最小化）は呼ばないこと
+    // バックバッファを作り直す（ビューの RT はパネルの大きさに合わせるので別）。0 サイズ（最小化）は呼ばないこと
     void Resize(std::uint32_t width, std::uint32_t height);
 
     // シェーダーのファイルが保存されていたら作り直す。毎フレーム呼んでよい（確認は 0.5 秒おき）
@@ -83,6 +112,10 @@ public:
                               std::span<const SubMeshDesc> subMeshes = {});
     // 最初から用意してある 1 辺 1 の立方体
     TE::MeshHandle CubeMesh() const { return m_CubeMesh; }
+    // 頂点をすべて囲む箱（メッシュの空間）。エディターでのクリック選択に使う。無効な番号なら nullptr
+    const TE::Bounds* MeshBounds(TE::MeshHandle mesh) const {
+        return mesh.IsValid() && mesh.index < m_Meshes.size() ? &m_Meshes[mesh.index].bounds : nullptr;
+    }
 
     // ---- テクスチャ / マテリアル ---- //
     // RGBA8 の画像を GPU に置き、番号を返す。mips[0] が一番大きい段。
@@ -95,14 +128,27 @@ public:
     TE::MaterialHandle DefaultMaterial() const { return m_DefaultMaterial; }
 
     // ---- 1 フレームの描画 ---- //
-    void SetCamera(const TE::Matrix4x4& view, const TE::Matrix4x4& projection);
-    void SetClearColor(const TE::Color& color) { m_ClearColor = color; }
-    // 描くものを積む。実際に GPU へ送るのは Render のとき
+    // 描くものを積む。全ビューで共通（同じインスタンスを、有効なビューの数だけ描く）。実際に GPU へ送るのは Render のとき
     void Draw(TE::MeshHandle mesh, const TE::Matrix4x4& world, const TE::Color& color);
     // 積んだものをまとめて描いて Present する
     void Render();
 
-    float AspectRatio() const;
+    // ---- ビュー（3D を描くオフスクリーンの RT）---- //
+    // 3D はバックバッファではなく各ビューの RT に描き、バックバッファには UI だけを描く。
+    // 同じ大きさなら何もしない。0 は無視する。RT を作り直したら ViewColor の中身が変わるので、取り直すこと
+    void ResizeView(ViewId id, std::uint32_t width, std::uint32_t height);
+    // false のビューは描かない（タブの裏に隠れているときなど）。状態は保たれるので、また true にすれば続きから描ける
+    void SetViewEnabled(ViewId id, bool enabled) { GetView(id).enabled = enabled; }
+    bool IsViewEnabled(ViewId id) const { return GetView(id).enabled; }
+    // このビューを描くときのカメラと背景色。描く前に毎フレーム呼ぶ
+    void SetViewCamera(ViewId id, const TE::Matrix4x4& view, const TE::Matrix4x4& projection, const TE::Color& clearColor);
+    std::uint32_t ViewWidth(ViewId id) const { return GetView(id).width; }
+    std::uint32_t ViewHeight(ViewId id) const { return GetView(id).height; }
+    // 幅 / 高さ。RT がまだ無ければ 1
+    float ViewAspect(ViewId id) const;
+    // ImGui::Image で表示するためのテクスチャ。ResizeView で作り直されるので、変わったら取り直す。
+    // まだ一度も ResizeView していないビューは空（nullptr）
+    const RHITextureRef& ViewColor(ViewId id) const { return GetView(id).color; }
 
 private:
     // 物体 1 個ぶんのデータ。インスタンス用の頂点バッファにこのまま詰めて送る
@@ -115,6 +161,7 @@ private:
         RHIBufferRef vertexBuffer;
         RHIBufferRef indexBuffer;
         std::vector<SubMeshDesc> subMeshes;  // 少なくとも 1 つある。material は必ず有効
+        TE::Bounds bounds;                   // 作るときに頂点から求める（CPU 側だけで使う）
     };
 
     struct Material {
@@ -122,11 +169,44 @@ private:
         RHIBufferRef constants;          // b2: 係数。作るときに書いたら変えない
     };
 
-    void CreateDepthBuffer(std::uint32_t width, std::uint32_t height);
+    // 3D を描く先 1 つぶん
+    struct ViewTarget {
+        // 3D を描く先。色は UI のパスでシェーダーから読むので RenderTarget | ShaderResource
+        RHITextureRef color;
+        RHITextureRef depth;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        // 作り直した直後は色も深度も Undefined。最初に使う前だけ Undefined から遷移させる
+        bool needsTransition = false;
+        bool enabled = false;
+        bool gridAllowed = false;  // グリッドを描いてよいビューか（Scene だけ）
+        TE::Matrix4x4 view;
+        TE::Matrix4x4 projection;
+        TE::Color clearColor{ 0.10f, 0.12f, 0.18f, 1.0f };
+        // フレームごとの定数（カメラ・ライト）。ビューごとに分ける（1 つを共有すると、2 つ目の書き込みで 1 つ目が上書きされる）。
+        // Upload メモリなので、作ったときに一度 Map したまま書き続ける
+        RHIBufferRef constants;
+        void* mappedConstants = nullptr;
+        // デバッグ名（リテラルを指すだけ。作り直すときにも使う）
+        const char* colorName = "ViewColor";
+        const char* depthName = "ViewDepth";
+        const char* constantsName = "FrameConstants";
+    };
+
+    ViewTarget& GetView(ViewId id) { return m_Views[static_cast<std::size_t>(id)]; }
+    const ViewTarget& GetView(ViewId id) const { return m_Views[static_cast<std::size_t>(id)]; }
+
+    // ビューの色と深度を作り直す（大きさが変わったとき）
+    void CreateViewTargets(ViewTarget& view, std::uint32_t width, std::uint32_t height);
+    // ビューの定数バッファを作る
+    void CreateConstantBuffer(ViewTarget& view);
+    // 1 つのビューの 3D パスを記録する（定数の書き込み・バリア・描画・UI から読める状態への遷移まで）
+    void RecordViewPass(ViewTarget& view);
     void CreatePipelineLayout();
     // VS / PS をファイルからコンパイルして PSO を作る。失敗したら nullptr（ログは出す）
     RHIPipelineStateRef BuildPipelineState();
-    void CreateConstantBuffer();
+    RHIPipelineStateRef BuildGridPipelineState();
+    static constexpr const char* kGridShaderFile = "Grid.hlsl";
     void CreateDefaultMaterial();
     void EnsureInstanceCapacity(std::size_t instanceCount);
     TE::MeshHandle CreateCubeMesh();
@@ -149,25 +229,20 @@ private:
     std::uint64_t m_FenceValue = 0;
     std::uint32_t m_FrameSlot = 0;
 
-    // 深度バッファ。作った直後は Undefined なので、最初に使う前に DepthWrite へ遷移させる
-    RHITextureRef m_DepthBuffer;
-    bool m_DepthNeedsTransition = false;
+    // 添字 = ViewId。ビューの色と深度はここに持つ
+    std::array<ViewTarget, static_cast<std::size_t>(ViewId::Count)> m_Views;
 
     // デスクリプタテーブルを作るときにレイアウトが要るので、PSO とは別に持っておく
     RHIPipelineLayoutRef m_PipelineLayout;
     RHIPipelineStateRef m_Pipeline;
+    RHIPipelineStateRef m_GridPipeline;
+    bool m_GridVisible = true;
     std::filesystem::path m_ShaderDirectory;
     // 前方宣言のまま unique_ptr で持てるのは、破棄する ~Renderer が .cpp（中身が見える所）にあるため
     std::unique_ptr<ShaderWatcher> m_ShaderWatcher;
+    OverlayCallback m_OnOverlay;
 
-    // フレームごとの定数（カメラ・ライト）。Upload メモリなので、作ったときに一度 Map したまま書き続ける
-    RHIBufferRef m_ConstantBuffer;
-    void* m_MappedConstants = nullptr;
-    TE::Matrix4x4 m_View;
-    TE::Matrix4x4 m_Projection;
-    TE::Color m_ClearColor{ 0.10f, 0.12f, 0.18f, 1.0f };
-
-    // 全メッシュぶんのインスタンスを 1 本に詰めるバッファ。足りなくなったら 2 倍に作り直す
+    // 全メッシュぶんのインスタンスを 1 本に詰めるバッファ。足りなくなったら 2 倍に作り直す。全ビューで共有して読む
     RHIBufferRef m_InstanceBuffer;
     InstanceData* m_MappedInstances = nullptr;
     std::size_t m_InstanceCapacity = 0;

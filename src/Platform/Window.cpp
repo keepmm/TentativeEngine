@@ -86,6 +86,11 @@ LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 }
 
 LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // 先にフック（ImGui など）へ見せる。使われたメッセージは Input にも渡さない
+    if (m_MessageHook && m_MessageHook(hwnd, msg, wParam, lParam)) {
+        return TRUE;
+    }
+
     // 入力はまず Input に記録だけさせる。WM_SYSKEYDOWN（Alt+F4 など）は DefWindowProc まで流さないと
     // ウィンドウが閉じられなくなるので、ここでは return しない
     m_Input.OnMessage(msg, wParam, lParam);

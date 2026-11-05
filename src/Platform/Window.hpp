@@ -17,6 +17,8 @@
 class Window {
 public:
     using ResizeCallback = std::function<void(UINT width, UINT height)>;
+    // メッセージを Window より先に見る。true を返したら、そのメッセージは使われたものとして Window は何もしない
+    using MessageHook = std::function<bool(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)>;
 
     Window(HINSTANCE instance, const std::wstring& title, UINT width, UINT height);
     ~Window();
@@ -36,6 +38,7 @@ public:
     const TE::Input& GetInput() const { return m_Input; }
 
     void SetResizeCallback(ResizeCallback callback) { m_OnResize = std::move(callback); }
+    void SetMessageHook(MessageHook hook) { m_MessageHook = std::move(hook); }
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -46,5 +49,6 @@ private:
     UINT m_Height = 0;
     bool m_Minimized = false;
     ResizeCallback m_OnResize;
+    MessageHook m_MessageHook;
     TE::Input m_Input;
 };

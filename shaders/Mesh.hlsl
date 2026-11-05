@@ -1,18 +1,6 @@
-// メッシュの描画
-#ifdef __spirv__
-#define VK_BINDING(b, s) [[vk::binding(b ,s)]]
-#define VK_LOCATION(n) [[vk::location(n)]]
-#else
-#define VK_BINDING(b, s)
-#define VK_LOCATION(n)
-#endif
-
-VK_BINDING(0, 0)
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 g_ViewProjection; // C++ 側で Transposed() してある（cbuffer は列優先で読むため）
-    float4 g_LightDirection;
-};
+// メッシュの描画（インスタンシング + テクスチャ 3 枚 + ランバート）
+// VK_BINDING / VK_LOCATION と FrameConstants（b0）は Common.hlsli にある
+#include "Common.hlsli"
 
 // マテリアル。スロット 2 なので Vulkan では set 2
 VK_BINDING(2, 2)

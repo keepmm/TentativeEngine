@@ -116,17 +116,47 @@ endif()
 # add_executable に入れるのは IDE に表示するためだけ。HEADER_FILE_ONLY を付けないと、
 # VS がビルド時に FXC でコンパイルしようとして「missing entry point」で失敗する
 set(TE_SHADER_FILES
+    shaders/VulkanBinding.hlsli
+    shaders/Common.hlsli
     shaders/Mesh.hlsl
+    shaders/Grid.hlsl
+    shaders/ImGui.hlsl
 )
 set_source_files_properties(${TE_SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
+# 描画は自前（src/UI/ImGuiRenderer が RHI で描く）なので、公式のバックエンドは Win32 だけ使う
+add_library(imgui STATIC
+    external/imgui/imgui.cpp
+    external/imgui/imgui_draw.cpp
+    external/imgui/imgui_tables.cpp
+    external/imgui/imgui_widgets.cpp
+    external/imgui/imgui_demo.cpp
+    external/imgui/backends/imgui_impl_win32.cpp
+    # ギズモ（移動・回転・拡縮の取っ手）。ImGui の上で描くライブラリ（MIT）
+    external/ImGuizmo/src/ImGuizmo.cpp
+)
+# SYSTEM: 使う側で imgui のヘッダの警告を /W4 の対象にしない
+target_include_directories(imgui SYSTEM PUBLIC external/imgui external/ImGuizmo/src)
+# ImGuizmo の中の符号の変換（int → ImGuiID）の警告。外部のコードなので、そのファイルだけ止める
+if(MSVC)
+    set_source_files_properties(external/ImGuizmo/src/ImGuizmo.cpp PROPERTIES COMPILE_OPTIONS "/wd4245")
+endif()
+# 古い API を使っていたらコンパイルエラーにして気付けるようにする
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+
 
 # ---- 本体 ----
 add_executable(TentativeEngine WIN32
     src/main.cpp
+    src/Reflection.hpp
+    src/Core/FixedString.hpp
+    src/Scene/Name.hpp
+    src/Engine/EngineTypes.hpp
+    src/Engine/EngineTypes.cpp
 
     src/Core/Defines.hpp
     src/Core/Log.hpp
     src/Core/Timer.hpp
+    src/Core/Platform.hpp
 
     src/Platform/Window.hpp
     src/Platform/Window.cpp
@@ -185,6 +215,16 @@ add_executable(TentativeEngine WIN32
     src/Asset/ModelImporter.hpp
     src/Asset/ModelImporter.cpp
 
+    src/UI/ImGuiLayer.hpp
+    src/UI/ImGuiLayer.cpp
+    src/UI/ImGuiRenderer.hpp
+    src/UI/ImGuiRenderer.cpp
+
+    src/Editor/Editor.hpp
+    src/Editor/Editor.cpp
+    src/Editor/ConsolePanel.hpp
+    src/Editor/ConsolePanel.cpp
+
     ${TE_SHADER_FILES}
 )
 
@@ -192,7 +232,7 @@ target_include_directories(TentativeEngine PRIVATE src)
 
 # d3dcompiler : 実行時の HLSL コンパイル（ShaderCompiler.cpp だけが使う）
 # xinput      : ゲームパッド（Input.cpp だけが使う）
-target_link_libraries(TentativeEngine PRIVATE RHI d3dcompiler xinput)
+target_link_libraries(TentativeEngine PRIVATE RHI imgui d3dcompiler xinput)
 
 if(TE_ENABLE_VULKAN)
     # Vulkan 用に HLSL を SPIR-V へコンパイルする dxc（ShaderCompiler.cpp だけが使う）
