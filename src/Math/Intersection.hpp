@@ -44,6 +44,43 @@ inline bool RayTriangle(const Ray& ray, const Vector3& a, const Vector3& b, cons
     return RayTriangle(ray, a, b, c, distance, u, v);
 }
 
+/// @brief レイと軸に沿った箱（AABB）の交差（スラブ法）。クリックで物体を選ぶときの大まかな判定に使う
+/// @param distance 箱に入る点までの距離。origin が箱の中なら 0
+/// @return 前方で交わったら true
+inline bool RayAABB(const Ray& ray, const Vector3& boxMin, const Vector3& boxMax, float& distance) {
+    // 軸ごとに「箱の 2 枚の面の間にいる t の範囲」を求め、3 軸の範囲が重なれば交わっている
+    float tMin = 0.0f;
+    float tMax = Mathf::Infinity;
+    const float origin[3] = { ray.origin.x, ray.origin.y, ray.origin.z };
+    const float direction[3] = { ray.direction.x, ray.direction.y, ray.direction.z };
+    const float lo[3] = { boxMin.x, boxMin.y, boxMin.z };
+    const float hi[3] = { boxMax.x, boxMax.y, boxMax.z };
+    for (int axis = 0; axis < 3; ++axis) {
+        if (Mathf::Abs(direction[axis]) < 1e-8f) {
+            // この軸と平行。面の間にいなければ当たらない
+            if (origin[axis] < lo[axis] || origin[axis] > hi[axis]) {
+                return false;
+            }
+            continue;
+        }
+        const float inverse = 1.0f / direction[axis];
+        float t0 = (lo[axis] - origin[axis]) * inverse;
+        float t1 = (hi[axis] - origin[axis]) * inverse;
+        if (t0 > t1) {
+            const float swap = t0;
+            t0 = t1;
+            t1 = swap;
+        }
+        tMin = t0 > tMin ? t0 : tMin;
+        tMax = t1 < tMax ? t1 : tMax;
+        if (tMin > tMax) {
+            return false;
+        }
+    }
+    distance = tMin;
+    return true;
+}
+
 // 線分 a-b の上で point に一番近い点（カプセルの当たり判定などで使う）
 inline Vector3 ClosestPointOnSegment(const Vector3& point, const Vector3& a, const Vector3& b) {
     const Vector3 ab = b - a;
