@@ -149,6 +149,8 @@ public:
     // ImGui::Image で表示するためのテクスチャ。ResizeView で作り直されるので、変わったら取り直す。
     // まだ一度も ResizeView していないビューは空（nullptr）
     const RHITextureRef& ViewColor(ViewId id) const { return GetView(id).color; }
+    // このビューの色をバックバッファ全面へ写す。Editor を使わないときに呼ぶ
+    void SetPresentView(ViewId id);
 
 private:
     // 物体 1 個ぶんのデータ。インスタンス用の頂点バッファにこのまま詰めて送る
@@ -258,4 +260,16 @@ private:
     // clear しても確保したメモリは残るので、2 フレーム目からはメモリ確保が起きない
     std::vector<std::vector<InstanceData>> m_PendingInstances;
     TE::MeshHandle m_CubeMesh;
+
+    void CreatePresentPipeline();
+    void RecordPresent();
+    static constexpr const char* kPresentShaderFile = "Present.hlsl";
+
+    RHIPipelineLayoutRef m_PresentLayout;
+    RHIPipelineStateRef m_PresentPipeline;
+    RHIDescriptorTableRef m_PresentTable;
+    // テーブルに置いているテクスチャ
+    IRHITexture* m_PresentSource = nullptr;
+    ViewId m_PresentView = ViewId::Game;
+    bool m_PresentEnabled = false;
 };

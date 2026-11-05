@@ -179,6 +179,16 @@ float Renderer::ViewAspect(ViewId id) const {
     return static_cast<float>(view.width) / static_cast<float>(view.height);
 }
 
+void Renderer::SetPresentView(ViewId id)
+{
+    if (!m_PresentPipeline)
+    {
+        CreatePresentPipeline();
+    }
+    m_PresentView = id;
+    m_PresentEnabled = true;
+}
+
 void Renderer::PollShaderReload(float deltaSeconds) {
     if (!m_ShaderWatcher->Poll(deltaSeconds)) {
         return;
@@ -390,6 +400,84 @@ RHITextureRef Renderer::UploadTexture(std::span<const TextureMipDesc> mips, bool
     return texture;
 }
 
+void Renderer::CreatePresentPipeline()
+{
+    RHIPipelineLayoutDesc layoutDesc{};
+    layoutDesc.slots = {
+        { ERHIBindingType::ConstantBuffer, 0, 0, 1, ERHIShaderStage::Vertex },
+        { ERHIBindingType::TextureTable, 0, 0, 1, ERHIShaderStage::Pixel },
+    };
+    // samplerの作成
+    ERHIStaticSamplerDesc sampler{};
+    sampler.shaderRegister = 0;
+    sampler.filter = ERHIFilter::Linear;
+    sampler.address = ERHIAddressMode::Clamp;
+    sampler.visibility = ERHIShaderStage::Pixel;
+    layoutDesc.staticSamplers = { sampler };
+    layoutDesc.debugName = "PresentLayout";
+    m_PresentLayout = m_Device->CreatePipelineLayout(layoutDesc);
+    if (!m_PresentLayout) {
+        throw std::runtime_error("転送用のパイプラインレイアウトの生成に失敗しました");
+    }
+
+    const std::filesystem::path path = m_ShaderDirectory / kPresentShaderFile;
+    const ERHIBackend backend = m_Device->GetBackend();
+    const auto vs = ShaderCompiler::CompileFile(path, "VSMain",
+        ShaderCompiler::Stage::Vertex,backend);
+    const auto ps = ShaderCompiler::CompileFile(path, "PSMain",
+        ShaderCompiler::Stage::Pixel, backend);
+    if (vs.empty() || ps.empty())
+    {
+        throw std::runtime_error("転送用のシェーダーを読めませんでした");
+    }
+
+    // pso作成
+    RHIGraphicsPipelineDesc psoDesc{};
+    psoDesc.layout = m_PresentLayout;
+    psoDesc.vs = { vs.data(), vs.size(),"VSMain"};
+    psoDesc.ps = { ps.data(), ps.size(),"PSMain" };
+    psoDesc.rasterizer.cullMode = ERHICullMode::None;
+    psoDesc.depthStencil.depthTestEnable = false;
+    psoDesc.depthStencil.depthWriteEnable = false;
+    psoDesc.numRenderTargets = 1;
+    psoDesc.rtvFormat[0] = m_SwapChain->GetFormat();
+    psoDesc.dsvFormat = ERHIFormat::Unknown;
+    psoDesc.debugName = "PresentPSO";
+    m_PresentPipeline = m_Device->CreatePipelineState(psoDesc);
+    if (!m_PresentPipeline) {
+        throw std::runtime_error("転送用の PSO の生成に失敗しました");
+    }
+}
+
+void Renderer::RecordPresent()
+{
+    ViewTarget& view = GetView(m_PresentView);
+    // カメラがなく描いてないフレームは
+    // 中身が未定義なので読まない
+    if (!view.enabled || !view.color)
+    {
+        return;
+    }
+
+    if (view.color.get() != m_PresentSource)
+    {
+        // 描画に使ったテーブルは書き換えれないので
+        // 作り直す
+        m_PresentTable = m_Device->CreateDescriptorTable(m_PresentLayout.get(), 1);
+        if (!m_PresentTable)
+        {
+            throw std::runtime_error("転送用のデスクリプタテーブルの生成に失敗しました");
+        }
+        m_PresentTable->SetTexture(0, view.color);
+        m_PresentSource = view.color.get();
+    }
+
+    m_CommandList->SetPipelineState(m_PresentPipeline.get());
+    m_CommandList->SetConstantBuffer(0, view.constants.get());
+    m_CommandList->SetDescriptorTable(1, m_PresentTable.get());
+    m_CommandList->Draw(3);
+}
+
 void Renderer::CreateDefaultMaterial() {
     // テクスチャを持たないマテリアルが、テクスチャを持つものと同じシェーダーで描けるようにするための 1x1 の画像。
     // 掛け算・足し算をしても結果が変わらない値にしておく
@@ -476,6 +564,7 @@ void Renderer::Render() {
 
     m_CommandList->SetViewport({ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f });
     m_CommandList->SetScissor({ 0, 0, static_cast<std::int32_t>(width), static_cast<std::int32_t>(height) });
+    if (m_PresentEnabled) RecordPresent();
     // 深度なしのパスなので depthFormat は Unknown（呼ばれた側はこれで PSO を選ぶ）
     if (m_OnOverlay) {
         m_OnOverlay({ *m_CommandList, m_FrameSlot, m_SwapChain->GetFormat(), ERHIFormat::Unknown });
