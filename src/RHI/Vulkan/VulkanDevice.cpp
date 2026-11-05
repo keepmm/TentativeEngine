@@ -265,6 +265,9 @@ bool VulkanDevice::CreateLogicalDevice()
 	features13.pNext = &features12;
 	features13.dynamicRendering = VK_TRUE;
 	features13.synchronization2 = VK_TRUE;
+	// dxc は Vulkan 1.3 向けにすると HLSL の discard を OpDemoteToHelperInvocation にする。
+	// 有効にしないと discard を含むシェーダー（グリッドなど）で検証エラーになる。1.3 では必ず対応している機能
+	features13.shaderDemoteToHelperInvocation = VK_TRUE;
 
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
