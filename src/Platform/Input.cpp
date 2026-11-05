@@ -4,11 +4,15 @@
  */
 #include "Platform/Input.hpp"
 
+#include "Core/Platform.hpp"
 #include "Core/Log.hpp"
 
+
+#if TE_PLATFORM_WINDOWS
 #include <Windows.h>
 #include <windowsx.h>  // GET_X_LPARAM / GET_Y_LPARAM（LOWORD だと負の座標が正の大きな数になる）
 #include <Xinput.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -36,10 +40,12 @@ namespace TE {
             return value < 0.0f ? -scaled : scaled;
         }
 
+#if TE_PLATFORM_WINDOWS
         float NormalizeStick(SHORT raw) {
             // -32768 側が 1 だけ範囲が広いので、-1 で止めて対称にする
             return std::max(-1.0f, static_cast<float>(raw) / 32767.0f);
         }
+#endif
 
         bool IsValidKey(int vk) { return vk >= 0 && vk < 256; }
         bool IsValidButton(int button) { return button >= 0 && button < MouseButton::Count; }
@@ -58,6 +64,7 @@ namespace TE {
         UpdatePads(deltaSeconds);
     }
 
+#if TE_PLATFORM_WINDOWS
     void Input::OnMessage(std::uint32_t msg, std::uintptr_t wParam, std::intptr_t lParam) {
         switch (msg) {
         case WM_KEYDOWN:
@@ -106,6 +113,7 @@ namespace TE {
         m_MousePosition = position;
         m_HasMousePosition = true;
     }
+#endif
 
     void Input::ReleaseMouseButtons() {
         std::memset(m_MouseButtons, 0, sizeof(m_MouseButtons));
@@ -118,6 +126,26 @@ namespace TE {
 
     bool Input::AnyMouseButton() const {
         return std::any_of(std::begin(m_MouseButtons), std::end(m_MouseButtons), [](bool down) { return down; });
+    }
+
+    void Input::OnTouch(float x, float y)
+    {
+        const Vector2 position{ x,y };
+        // 指を置いたフレームは前の位置がないので
+        // 移動量を数えない
+        if (m_HasMousePosition) {
+            m_MouseDelta += position - m_MousePosition;
+        }
+        m_MousePosition = position;
+        m_HasMousePosition = true;
+        m_MouseButtons[MouseButton::Left] = true;
+    }
+
+    void Input::OnTouchEnd()
+    {
+        ReleaseAll();
+        // 次のタッチで、離れた場所への移動を回転として数えない
+        m_HasMousePosition = false;
     }
 
     // ---------------------------------------------------//
@@ -145,6 +173,7 @@ namespace TE {
     // 未接続の番号への XInputGetState は数百μs かかることがあるので、
     // つながっていないパッドは kPadScanInterval おきにしか探し直さない
     void Input::UpdatePads(float deltaSeconds) {
+#if TE_PLATFORM_WINDOWS
         m_PadScanTimer -= deltaSeconds;
         const bool rescan = m_PadScanTimer <= 0.0f;
         if (rescan) {
@@ -204,6 +233,9 @@ namespace TE {
             if (rightTrigger > kTriggerButtonThreshold) { bits |= PadButton::RTrigger; }
             m_PadButtons[i] = bits;
         }
+#else
+        (void)deltaSeconds;  // Android のゲームパッドは未対応（常に未接続）
+#endif
     }
 
     bool Input::Pad::Connected() const {
@@ -228,11 +260,17 @@ namespace TE {
         if (!Connected()) {
             return;
         }
+#if TE_PLATFORM_WINDOWS
         XINPUT_VIBRATION vibration{};
         vibration.wLeftMotorSpeed  = static_cast<WORD>(std::clamp(left, 0.0f, 1.0f) * 65535.0f);
         vibration.wRightMotorSpeed = static_cast<WORD>(std::clamp(right, 0.0f, 1.0f) * 65535.0f);
         XInputSetState(static_cast<DWORD>(index), &vibration);
         input->m_VibrationTimer[index] = seconds > 0.0f ? seconds : 0.0f;
+#else
+        (void)left;
+        (void)right;
+        (void)seconds;
+#endif
     }
 
 }  // namespace TE

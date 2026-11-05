@@ -7,8 +7,13 @@
  *********************************************************************/
 #pragma once
 
-// NOMINMAX は CMake で全体に定義している
+#include "Core/Platform.hpp"
+
+#if TE_PLATFORM_WINDOWS
 #define VK_USE_PLATFORM_WIN32_KHR
+#else
+#define VK_USE_PLATFORM_ANDROID_KHR
+#endif
 #include <vulkan/vulkan.h>
 
 

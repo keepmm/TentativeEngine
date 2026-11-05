@@ -3,7 +3,7 @@
  * \brief Win32 ウィンドウの生成とメッセージ処理
  */
 #include "Platform/Window.hpp"
-
+#if TE_PLATFORM_WINDOWS
 #include <stdexcept>
 
 namespace {
@@ -134,3 +134,4 @@ LRESULT Window::HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
+#endif

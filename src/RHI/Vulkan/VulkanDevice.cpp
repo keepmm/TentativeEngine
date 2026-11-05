@@ -147,7 +147,11 @@ bool VulkanDevice::CreateInstance(bool enableBebugLayer)
 	std::vector<const char*> extensions =
 	{
 		VK_KHR_SURFACE_EXTENSION_NAME,
+#if TE_PLATFORM_WINDOWS
 		VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+#else
+		VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
+#endif
 	};
 
 	// デバッグレイヤーの確認と追加

@@ -4,28 +4,23 @@
  */
 #pragma once
 
-#include <Windows.h>
+#include <chrono>
 
-// QueryPerformanceCounter（高精度カウンタ）で時間を測る。
-// timeGetTime などより分解能が細かく、フレーム単位の計測に向く。
+
 class Timer {
 public:
-    Timer() {
-        QueryPerformanceFrequency(&m_Frequency);
-        QueryPerformanceCounter(&m_Last);
-    }
+    Timer() : m_Last(Clock::now()) {}
 
-    // 前回 Tick を呼んだときからの経過秒数を返す。毎フレーム 1 回呼ぶ想定
-    double Tick() {
-        LARGE_INTEGER now{};
-        QueryPerformanceCounter(&now);
-        const double seconds = static_cast<double>(now.QuadPart - m_Last.QuadPart)
-                             / static_cast<double>(m_Frequency.QuadPart);
+    /// @return 前回Tickを呼んだ時からの経過秒数を返す 
+    double Tick()
+    {
+        const Clock::time_point now = Clock::now();
+        const std::chrono::duration<double> seconds = now - m_Last;
         m_Last = now;
-        return seconds;
+        return seconds.count();
     }
-
 private:
-    LARGE_INTEGER m_Frequency{};
-    LARGE_INTEGER m_Last{};
+    using Clock = std::chrono::steady_clock;
+
+    Clock::time_point m_Last;
 };

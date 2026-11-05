@@ -48,12 +48,21 @@ bool VulkanSwapChain::Init(const RHISwapChainDesc& desc)
 	m_Vsync = desc.vSync;
 
 	// Win32 ウィンドウハンドル
+#if TE_PLATFORM_WINDOWS
 	VkWin32SurfaceCreateInfoKHR surfaceInfo{};
 	surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
 	surfaceInfo.hinstance = GetModuleHandleW(nullptr);
 	surfaceInfo.hwnd = static_cast<HWND>(desc.windowHandle);
-
-	if (vkCreateWin32SurfaceKHR(m_Device.GetVkInstance(), &surfaceInfo, nullptr, &m_Surface) != VK_SUCCESS)
+	const VkResult surfaceResult =
+		vkCreateWin32SurfaceKHR(m_Device.GetVkInstance(), &surfaceInfo, nullptr, &m_Surface);
+#else
+	VkAndroidSurfaceCreateInfoKHR surfaceInfo{};
+	surfaceInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+	surfaceInfo.window = static_cast<ANativeWindow*>(desc.windowHandle);
+	const VkResult surfaceResult =
+		vkCreateAndroidSurfaceKHR(m_Device.GetVkInstance(), &surfaceInfo, nullptr, &m_Surface);
+#endif
+	if (surfaceResult != VK_SUCCESS)
 	{
 		LogError("[RHI] Vulkan SwapChain: サーフェスの作成に失敗しました");
 		return false;
@@ -157,7 +166,10 @@ bool VulkanSwapChain::CreateSwapChainInternal(uint32_t width, uint32_t height)
 	createInfo.imageArrayLayers = 1;
 	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	createInfo.preTransform = caps.currentTransform;
+	createInfo.preTransform =
+		(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+		? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+		: caps.currentTransform;
 	createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 	createInfo.presentMode = presentMode;
 	createInfo.clipped = VK_TRUE;

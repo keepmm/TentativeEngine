@@ -5,11 +5,18 @@
 #include "Asset/ModelImporter.hpp"
 
 #include "Core/Log.hpp"
+#include "Core/Platform.hpp"
 
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+#if TE_PLATFORM_WINDOWS
 #include <DirectXTex.h>
+#else
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+#include <vector>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -207,6 +214,7 @@ namespace TE {
         //                      テクスチャ                       //
         // ---------------------------------------------------//
 
+#if TE_PLATFORM_WINDOWS
         // デコード済みの画像を RGBA8 にそろえ、ミップマップを作って TextureData に詰める
         std::shared_ptr<TextureData> ToTextureData(const DirectX::ScratchImage& decoded) {
             const DirectX::Image* src = decoded.GetImage(0, 0, 0);
@@ -301,6 +309,80 @@ namespace TE {
             }
             return ToTextureData(image);
         }
+#else
+        // RGBA8 の画像に、2x2 の平均で 1x1 までのミップマップを足す
+        std::shared_ptr<TextureData> ToTextureData(const std::uint8_t* pixels, std::uint32_t width, std::uint32_t height) {
+            auto out = std::make_shared<TextureData>();
+            out->pixels.assign(pixels, pixels + std::size_t{ width } * height * 4);
+            out->mips.push_back(TextureData::Mip{ 0, width, height });
+
+            std::uint32_t w = width;
+            std::uint32_t h = height;
+            while (w > 1 || h > 1) {
+                const std::size_t srcOffset = out->mips.back().offset;
+                const std::uint32_t nw = std::max(w / 2, 1u);
+                const std::uint32_t nh = std::max(h / 2, 1u);
+                const std::size_t dstOffset = out->pixels.size();
+                out->pixels.resize(dstOffset + std::size_t{ nw } * nh * 4);
+                const std::uint8_t* src = out->pixels.data() + srcOffset;
+                std::uint8_t* dst = out->pixels.data() + dstOffset;
+                for (std::uint32_t y = 0; y < nh; ++y) {
+                    const std::uint32_t y0 = std::min(y * 2, h - 1);
+                    const std::uint32_t y1 = std::min(y * 2 + 1, h - 1);
+                    for (std::uint32_t x = 0; x < nw; ++x) {
+                        const std::uint32_t x0 = std::min(x * 2, w - 1);
+                        const std::uint32_t x1 = std::min(x * 2 + 1, w - 1);
+                        for (std::uint32_t ch = 0; ch < 4; ++ch) {
+                            const int sum = src[(std::size_t{ y0 } * w + x0) * 4 + ch] + src[(std::size_t{ y0 } * w + x1) * 4 + ch]
+                                          + src[(std::size_t{ y1 } * w + x0) * 4 + ch] + src[(std::size_t{ y1 } * w + x1) * 4 + ch];
+                            dst[(std::size_t{ y } * nw + x) * 4 + ch] = static_cast<std::uint8_t>((sum + 2) / 4);
+                        }
+                    }
+                }
+                out->mips.push_back(TextureData::Mip{ dstOffset, nw, nh });
+                w = nw;
+                h = nh;
+            }
+            return out;
+        }
+
+        std::shared_ptr<TextureData> DecodeFile(const std::filesystem::path& path) {
+            int width = 0, height = 0, channels = 0;
+            stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, 4);
+            if (!pixels) {
+                LogWarning("[ModelImporter] 画像のデコードに失敗: " + path.string());
+                return nullptr;
+            }
+            auto out = ToTextureData(pixels, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+            stbi_image_free(pixels);
+            return out;
+        }
+
+        std::shared_ptr<TextureData> DecodeEmbedded(const aiTexture& texture) {
+            if (texture.mHeight == 0) {
+                // png / jpg などのファイルの中身が丸ごと入っている（mWidth がバイト数）
+                int width = 0, height = 0, channels = 0;
+                stbi_uc* pixels = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(texture.pcData),
+                    static_cast<int>(texture.mWidth), &width, &height, &channels, 4);
+                if (!pixels) {
+                    return nullptr;
+                }
+                auto out = ToTextureData(pixels, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+                stbi_image_free(pixels);
+                return out;
+            }
+            // 非圧縮の aiTexel は b, g, r, a の順なので、r と b を入れ替える
+            std::vector<std::uint8_t> rgba(std::size_t{ texture.mWidth } * texture.mHeight * 4);
+            const auto* src = reinterpret_cast<const std::uint8_t*>(texture.pcData);
+            for (std::size_t i = 0; i < rgba.size(); i += 4) {
+                rgba[i + 0] = src[i + 2];
+                rgba[i + 1] = src[i + 1];
+                rgba[i + 2] = src[i + 0];
+                rgba[i + 3] = src[i + 3];
+            }
+            return ToTextureData(rgba.data(), texture.mWidth, texture.mHeight);
+        }
+#endif
 
         // マテリアルが指すテクスチャ（ファイル名か、埋め込みの "*N"）をデコード済みの画像にする。
         // 同じ画像を何度もデコードしないよう、参照の文字列ごとに結果を覚えておく
@@ -341,8 +423,11 @@ namespace TE {
         private:
             // FBX には作った人の PC の絶対パスが入っていることが多い。
             // ファイル名だけ取り出して、モデルの横と textures/ フォルダを探す
-            std::filesystem::path FindFile(const std::string& reference) const {
-                std::filesystem::path name = FromUtf8(reference.c_str()).filename();
+            std::filesystem::path FindFile(const std::string& reference) const {/*
+                std::filesystem::path name = FromUtf8(reference.c_str()).filename();*/
+                std::string normalize = reference;
+                std::replace(normalize.begin(), normalize.end(), '\\', '/');
+                std::filesystem::path name = FromUtf8(normalize.c_str()).filename();
                 if (name.extension() == ".exr") {
                     name.replace_extension(".png");  // exr はデコードできないので、同じ名前の png があればそれを使う
                 }

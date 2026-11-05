@@ -6,8 +6,10 @@
  * \date   October 2026
  *********************************************************************/
 #pragma once
-
+#include "Core/Platform.hpp"
+#if TE_PLATFORM_WINDOWS
 #include <Windows.h>
+#endif
 
 #include <filesystem>
 #include <string>
@@ -15,6 +17,15 @@
 
 namespace TE
 {
+#if TE_PLATFORM_ANDROID
+	// android_main が内部ストレージの場所を入れる
+	inline std::filesystem::path& AndroidBaseDirectory()
+	{
+		static std::filesystem::path directory;
+		return directory;
+	}
+	inline std::filesystem::path ExecutableDirectory() { return AndroidBaseDirectory(); }
+#else
 	inline std::filesystem::path ExecutableDirectory()
 	{
 		// MAX_PATHを超える場所に置かれても取れるように
@@ -38,6 +49,7 @@ namespace TE
 		}
 			return std::filesystem::path(buffer).parent_path();
 	}
+#endif
 
 	inline std::filesystem::path FindDirectoryUpward(const std::filesystem::path& directoryName,
 		const std::filesystem::path& marker)

@@ -1,0 +1,62 @@
+plugins { id "com.android.application" }
+
+// Gradle 9 で Project.exec がなくなったので、ExecOperations を注入して使う
+interface ExecInjected {
+    @javax.inject.Inject
+    ExecOperations getExecOps()
+}
+def execOps = project.objects.newInstance(ExecInjected).execOps
+
+def engineRoot = file("../..")
+def generatedAssets = layout.buildDirectory.dir("generated/engineAssets").get().asFile
+
+android {
+    namespace "com.tentative.engine"
+    compileSdk 36
+    defaultConfig {
+        applicationId "com.tentative.engine"
+        minSdk 33   // VK_API_VERSION_1_3 が前提
+        targetSdk 35
+        versionCode 1
+        versionName "0.1"
+        ndk { abiFilters "arm64-v8a" }
+        externalNativeBuild { cmake { arguments "-DANDROID_STL=c++_shared" } }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("../../CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+    sourceSets { main { assets.srcDirs += generatedAssets } }
+    androidResources { noCompress += ["spv"] }
+}
+
+// シェーダーを SPIR-V にして、assets と一覧（manifest.txt）を作る
+tasks.register("prepareEngineAssets") {
+    outputs.dir generatedAssets
+    doLast {
+        delete generatedAssets
+        copy { from(new File(engineRoot, "assets")); into(new File(generatedAssets, "assets")) }
+        copy { from(new File(engineRoot, "shaders")); into(new File(generatedAssets, "shaders")) }
+
+        def dxc = "${System.getenv("VULKAN_SDK")}/Bin/dxc.exe"
+        ["Mesh", "Grid", "Present"].each { name ->
+            [["VSMain", "vs_6_0"], ["PSMain", "ps_6_0"]].each { pair ->
+                execOps.exec {
+                    commandLine dxc, "-E", pair[0], "-T", pair[1], "-spirv",
+                        "-fspv-target-env=vulkan1.3", "-O3",
+                        "-Fo", new File(generatedAssets, "shaders/${name}.${pair[0]}.spv").path,
+                        new File(engineRoot, "shaders/${name}.hlsl").path
+                }
+            }
+        }
+
+        def lines = []
+        generatedAssets.eachFileRecurse(groovy.io.FileType.FILES) {
+            lines << generatedAssets.toPath().relativize(it.toPath()).toString().replace("\\", "/")
+        }
+        new File(generatedAssets, "manifest.txt").text = lines.join("\n")
+    }
+}
+preBuild.dependsOn "prepareEngineAssets"

@@ -55,6 +55,12 @@ namespace TE {
         void OnMessage(std::uint32_t msg, std::uintptr_t wParam, std::intptr_t lParam);
         bool AnyMouseButton() const;
 
+        // ---- AndroidのWindowから呼ぶ)
+        void OnTouch(float x, float y);
+        void OnTouchEnd();
+        void OnPinch(float notches) { m_MouseWheel += notches; }
+        void onPinch(float notches) { m_MouseWheel += notches; }
+
         // ---- キーボード（vk は 'A' や VK_SPACE などの仮想キーコード）----
         bool GetKey(int vk) const;      // 押している間
         bool GetKeyDown(int vk) const;  // 押したフレームだけ

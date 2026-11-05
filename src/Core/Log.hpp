@@ -37,7 +37,11 @@ inline void SetLogSink(LogSink sink) { LogDetail::g_Sink = std::move(sink); }
 // Visual Studio の出力ウィンドウにメッセージを流す。
 // デバッガを付けて実行すれば見える。ファイルへの保存は必要になってから追加する。
 inline void Log(const std::string& message) {
+#if TE_PLATFORM_WINDOWS
     OutputDebugStringA((message + "\n").c_str());
+#else
+    __android_log_write(ANDROID_LOG_INFO, "TentativeEngine",message.c_str());
+#endif
 }
 
 // 重要度つき。出力ウィンドウで [ERROR] を検索すれば失敗だけ拾える

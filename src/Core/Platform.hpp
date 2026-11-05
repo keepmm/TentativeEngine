@@ -9,3 +9,11 @@
 #else
 #error "未対応のプラットフォーム"
 #endif
+
+// SAL 注釈は MSVC 専用なので、Android では空にする
+#if TE_PLATFORM_ANDROID
+#define _In_
+#define _In_opt_
+#define _In_reads_(count)
+#define _Out_writes_(count)
+#endif

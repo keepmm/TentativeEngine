@@ -4,6 +4,10 @@
  */
 #include "Renderer/ShaderCompiler.hpp"
 
+#include "Core/Platform.hpp"
+
+#if TE_PLATFORM_WINDOWS
+
 #include "Core/Defines.hpp"
 #include "Core/Log.hpp"
 
@@ -210,3 +214,33 @@ std::vector<std::uint8_t> CompileFile(
 }
 
 }  // namespace ShaderCompiler
+
+#else  // Android: 実行時にはコンパイルせず、Gradle が作った .spv を読む
+
+#include "Core/Log.hpp"
+
+#include <fstream>
+#include <iterator>
+
+namespace ShaderCompiler {
+
+std::vector<std::uint8_t> Compile(const std::string&, const char* debugName, const char*, Stage, ERHIBackend) {
+    LogError(std::string("[Shader] Android ではソースからコンパイルできない: ") + debugName);
+    return {};
+}
+
+std::vector<std::uint8_t> CompileFile(const std::filesystem::path& path, const char* entryPoint, Stage, ERHIBackend) {
+    // Mesh.hlsl + VSMain → Mesh.VSMain.spv
+    std::filesystem::path spv = path;
+    spv.replace_extension(std::string(".") + entryPoint + ".spv");
+    std::ifstream file(spv, std::ios::binary);
+    if (!file) {
+        LogError("[Shader] ファイルを開けません: " + spv.string());
+        return {};
+    }
+    return { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
+}
+
+}  // namespace ShaderCompiler
+
+#endif

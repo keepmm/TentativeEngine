@@ -6,8 +6,6 @@
 
 #include "Asset/ModelImporter.hpp"
 #include "Core/Log.hpp"
-#include "Editor/ConsolePanel.hpp"
-#include "Editor/Editor.hpp"
 #include "Game/Spin.hpp"
 #include "Math/Math.hpp"
 #include "Platform/Paths.hpp"
@@ -20,22 +18,36 @@
 #include "Scene/Transform.hpp"
 #include "Scene/TransformSystem.hpp"
 #include "Scene/Name.hpp"
+
+
+#if TE_PLATFORM_WINDOWS
+#include "Editor/ConsolePanel.hpp"
+#include "Editor/Editor.hpp"
 #include "Engine/EngineTypes.hpp"
 #include "UI/ImGuiLayer.hpp"
 #include "UI/ImGuiRenderer.hpp"
-
 #include <imgui.h>
+#endif
 
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 using namespace TE;
 
 namespace {
-    constexpr UINT kInitialWidth = 1280;
-    constexpr UINT kInitialHeight = 720;
+    constexpr std::uint32_t kInitialWidth = 1280;
+    constexpr std::uint32_t kInitialHeight = 720;
+
+#if TE_PLATFORM_WINDOWS
+    constexpr ERHIBackend kBackend = ERHIBackend::D3D12;
+#else
+    constexpr ERHIBackend kBackend = ERHIBackend::Vulkan;
+#endif
 
     // 動作確認用のモデル。assets フォルダの中の場所（assets は exe の場所からさかのぼって探す）
     constexpr const char* kSampleModelFile = "models/spot/spot.fbx";
@@ -54,25 +66,31 @@ namespace {
     }
 }
 
-Engine::Engine(HINSTANCE instance)
-    : m_Window(instance, L"TentativeEngine", kInitialWidth, kInitialHeight) {
+Engine::Engine(NativeAppHandle app)
+    : m_Window(app, L"TentativeEngine", kInitialWidth, kInitialHeight) {
+#if TE_PLATFORM_WINDOWS
     // 以降のログ（アダプタ名やシェーダーのエラーなど）をエディターの Console にも溜める
     m_Console = std::make_unique<ConsolePanel>();
+#endif
 
     // シェーダーは exe の場所から親へさかのぼって探す。
-    // 開発中はソースツリーの shaders/（保存すればそのまま反映される）、配布時は exe の横の shaders/ が見つかる
     const std::filesystem::path shaderDirectory = FindDirectoryUpward("shaders", Renderer::kMeshShaderFile);
     if (shaderDirectory.empty()) {
         throw std::runtime_error("shaders フォルダが見つかりません（exe の横か、その親のどこかに置く）");
     }
     m_Renderer = std::make_unique<Renderer>(
-        ERHIBackend::D3D12, m_Window.GetHandle(), m_Window.GetWidth(), m_Window.GetHeight(), shaderDirectory);
+        kBackend, m_Window.GetHandle(), m_Window.GetWidth(), m_Window.GetHeight(), shaderDirectory);
 
     // Window は 0 サイズを通知しない（最小化はフラグだけ立てる）ので、そのまま渡してよい
-    m_Window.SetResizeCallback([this](UINT width, UINT height) {
+    m_Window.SetResizeCallback([this](std::uint32_t width, std::uint32_t height) {
         m_Renderer->Resize(width, height);
+#if TE_PLATFORM_ANDROID
+        // Editor がパネルに合わせて変えてくれないので、ビューも画面に合わせる
+        m_Renderer->ResizeView(ViewId::Game, width, height);
+#endif
         });
 
+#if TE_PLATFORM_WINDOWS
     // UI。Window と Renderer はどちらも ImGui を知らないので、フックを通してここでつなぐ
     m_ImGuiLayer = std::make_unique<ImGuiLayer>(m_Window.GetHandle());
     m_ImGuiRenderer = std::make_unique<ImGuiRenderer>(m_Renderer->Device(), shaderDirectory);
@@ -86,6 +104,12 @@ Engine::Engine(HINSTANCE instance)
     // 型番号は初めて使ったときに決まるので、シーンを作る前に全部登録して確定させる
     RegisterEngineTypes(m_Types);
     m_Editor = std::make_unique<Editor>(*m_Renderer, *m_ImGuiRenderer, m_World, m_Types, *m_Console);
+#else
+    // Editor がないので、Game ビューをそのまま画面に出す
+    m_Renderer->SetViewEnabled(ViewId::Scene, false);
+    m_Renderer->ResizeView(ViewId::Game, m_Window.GetWidth(), m_Window.GetHeight());
+    m_Renderer->SetPresentView(ViewId::Game);
+#endif
 
     CreateSampleScene();
 }
@@ -95,8 +119,10 @@ Engine::~Engine() {
     // その後に Window がリサイズを通知して、破棄済みの Renderer を触らないよう外しておく
     m_Window.SetResizeCallback(nullptr);
     // ImGui は Renderer より先に消えるので、消えた後に呼ばれないよう外しておく
+#if TE_PLATFORM_WINDOWS
     m_Window.SetMessageHook(nullptr);
     m_Renderer->SetOverlayCallback(nullptr);
+#endif
 }
 
 void Engine::Run() {
@@ -109,7 +135,7 @@ void Engine::Run() {
 
         // 最小化中はバックバッファが 0 サイズになるので描かない
         if (m_Window.IsMinimized()) {
-            Sleep(16);
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
         Update(static_cast<float>(deltaSeconds));
@@ -119,14 +145,21 @@ void Engine::Run() {
 void Engine::Update(float deltaSeconds) {
     // 順番に意味がある: 動かす（カメラは入力で）→ 行列を計算する → 描くものを集める → GPU へ送る → 予約した変更を反映する
     // UI のフレームを始める。WantCapture* は前のフレームの UI の状態で決まる
+#if TE_PLATFORM_WINDOWS
     m_ImGuiLayer->BeginFrame();
+#endif
 
     SpinSystem(m_World, deltaSeconds);
     // Scene View の上で操作しているときだけカメラを動かす（パネルの上では動かさない）
+#if TE_PLATFORM_WINDOWS
     if (m_Editor->IsSceneViewActive()) {
         OrbitCameraSystem(m_World, m_Window.GetInput());
     }
+#else
+    OrbitCameraSystem(m_World, m_Window.GetInput());
+#endif
     TransformSystem(m_World);
+#if TE_PLATFORM_WINDOWS
     // G: グリッドの表示を切り替える（ModelViewer と同じキー）。UI の入力欄に文字を打っている間は反応させない
     if (!m_ImGuiLayer->WantCaptureKeyboard() && m_Window.GetInput().GetKeyDown('G')) {
         m_Renderer->SetGridVisible(!m_Renderer->IsGridVisible());
@@ -136,6 +169,15 @@ void Engine::Update(float deltaSeconds) {
     ImDrawData* uiDrawData = m_ImGuiLayer->EndFrame();
     // フォントなどを GPU に送る。送って待つので、Renderer がフレームの記録を始める前に済ませる
     m_ImGuiRenderer->UpdateTextures(uiDrawData);
+#else
+    // Editor の DrawGameView の代わり。カメラがなければ描かない
+    CameraMatrices camera;
+    const bool hasCamera = FindMainCamera(m_World, m_Renderer->ViewAspect(ViewId::Game), camera);
+    m_Renderer->SetViewEnabled(ViewId::Game, hasCamera);
+    if (hasCamera) {
+        m_Renderer->SetViewCamera(ViewId::Game, camera.view, camera.projection, camera.clear);
+    }
+#endif
 
     // 描く前に、保存されたシェーダーがあれば PSO を作り直しておく
     m_Renderer->PollShaderReload(deltaSeconds);

@@ -7,9 +7,11 @@
  * 更新履歴 10.13 作成
  * *********************************************************************/
 #include "IRHIDevice.hpp"
+#include "Core/Platform.hpp"
+#if TE_PLATFORM_WINDOWS
 #include "D3D11/D3D11Device.hpp"
 #include "D3D12/D3D12Device.hpp"
-// Vulkan SDK が見つかったときだけ CMake が TE_RHI_VULKAN を定義する。SDK がなくても D3D だけでビルドできるようにするため
+#endif
 #if TE_RHI_VULKAN
 #include "Vulkan/VulkanDevice.hpp"
 #endif
@@ -20,15 +22,23 @@ std::unique_ptr<IRHIDevice> CreateRHIDevice(const RHIDeviceDesc& desc)
 	{
 	case ERHIBackend::D3D11:
 	{
+#if TE_PLATFORM_WINDOWS
 		auto device = std::make_unique<D3D11Device>();
 		if (!device->Init(desc)) return nullptr;
 		return device;
+#else
+		return nullptr;
+#endif
 	}
 	case ERHIBackend::D3D12:
 	{
+#if TE_PLATFORM_WINDOWS
 		auto device = std::make_unique<D3D12Device>();
 		if (!device->Init(desc)) return nullptr;
 		return device;
+#else
+		return nullptr;
+#endif
 	}
 	case ERHIBackend::Vulkan:
 	{

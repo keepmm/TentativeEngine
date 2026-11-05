@@ -4,6 +4,10 @@
  */
 #pragma once
 
+#include "Core/Platform.hpp"
+
+#if TE_PLATFORM_WINDOWS
+
 #include <Windows.h>
 #include <wrl/client.h>
 
@@ -29,3 +33,5 @@ inline void ThrowIfFailed(HRESULT hr, const char* file, int line) {
 
 // HRESULT を返す呼び出しを包む。__FILE__ / __LINE__ はマクロを書いた位置に展開される
 #define THROW_IF_FAILED(hr) ThrowIfFailed((hr), __FILE__, __LINE__)
+
+#endif
